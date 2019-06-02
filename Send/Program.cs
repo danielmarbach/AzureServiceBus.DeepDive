@@ -7,7 +7,7 @@ namespace Send
 {
     class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString", EnvironmentVariableTarget.Machine);
+        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
         static string destination = "queue";
 
         static async Task Main(string[] args)

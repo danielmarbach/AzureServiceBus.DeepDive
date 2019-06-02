@@ -8,7 +8,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Azure.ServiceBus" Version="3.4.0" />
-    <PackageReference Include="servicebusexplorer" Version="4.1.112" />
   </ItemGroup>
 
 </Project>
