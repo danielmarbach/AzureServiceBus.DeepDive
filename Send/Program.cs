@@ -12,6 +12,8 @@ namespace Send
 
         static async Task Main(string[] args)
         {
+            await Prepare.Stage(connectionString, destination);
+
             var client = new QueueClient(connectionString, destination);
             try
             {
