@@ -26,6 +26,7 @@ namespace Send
                     async (message, token) =>
                     {
                         Console.WriteLine($"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                        // throw new InvalidOperationException();
                         await client.CompleteAsync(message.SystemProperties.LockToken);
                         syncEvent.TrySetResult(true);
                     },
