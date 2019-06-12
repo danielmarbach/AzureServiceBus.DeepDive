@@ -6,14 +6,17 @@ using Microsoft.Azure.ServiceBus;
 
 namespace Dedup
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string destination = "queue";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static TaskCompletionSource<bool> syncEvent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private static readonly string destination = "queue";
 
-        static async Task Main(string[] args)
+        private static TaskCompletionSource<bool> syncEvent =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, destination);
 
@@ -23,10 +26,11 @@ namespace Dedup
                 var content = Encoding.UTF8.GetBytes("Message1Message1");
                 var messageId = new Guid(content).ToString();
 
-                var messages = new List<Message> {
-                    new Message(content) { MessageId = messageId },
-                    new Message(content) { MessageId = messageId },
-                    new Message(content) { MessageId = messageId },
+                var messages = new List<Message>
+                {
+                    new Message(content) {MessageId = messageId},
+                    new Message(content) {MessageId = messageId},
+                    new Message(content) {MessageId = messageId}
                 };
 
                 await client.SendAsync(messages);
@@ -35,7 +39,8 @@ namespace Dedup
                 client.RegisterMessageHandler(
                     (message, token) =>
                     {
-                        Console.WriteLine($"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                        Console.WriteLine(
+                            $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
                         return Task.CompletedTask;
                     },
                     new MessageHandlerOptions(
@@ -56,7 +61,6 @@ namespace Dedup
                 Console.WriteLine("Messages sent");
 
                 Console.ReadLine();
-
             }
             finally
             {

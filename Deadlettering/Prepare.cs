@@ -8,15 +8,12 @@ namespace Deadlettering
         public static async Task Stage(string connectionString, string destination)
         {
             var client = new ManagementClient(connectionString);
-            if (await client.QueueExistsAsync(destination))
-            {
-                await client.DeleteQueueAsync(destination);
-            }
+            if (await client.QueueExistsAsync(destination)) await client.DeleteQueueAsync(destination);
 
             var description = new QueueDescription(destination)
             {
                 EnableDeadLetteringOnMessageExpiration = true, // default false
-                MaxDeliveryCount = 1,
+                MaxDeliveryCount = 1
             };
             await client.CreateQueueAsync(description);
 

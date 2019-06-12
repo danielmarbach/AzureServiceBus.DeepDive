@@ -6,11 +6,12 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace Forwarding
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static async Task Main(string[] args)
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString);
 

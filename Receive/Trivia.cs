@@ -8,7 +8,8 @@ namespace Receive
 {
     public static class Trivia
     {
-        public static async Task Hu(MessageReceiver receiver) {
+        public static async Task Hu(MessageReceiver receiver)
+        {
             Message message;
 
             message = await receiver.ReceiveAsync();

@@ -6,9 +6,10 @@ namespace Pubsub
 {
     public static class Prepare
     {
-        public static async Task Stage(string connectionString, string topicName, string rushSubscription, string currencySubscription)
+        public static async Task Stage(string connectionString, string topicName, string rushSubscription,
+            string currencySubscription)
         {
-            ManagementClient client = await Cleanup(connectionString, topicName, rushSubscription, currencySubscription);
+            var client = await Cleanup(connectionString, topicName, rushSubscription, currencySubscription);
 
             var subscriptionDescription = new SubscriptionDescription(topicName, rushSubscription);
             await client.CreateSubscriptionAsync(subscriptionDescription);
@@ -25,7 +26,7 @@ namespace Pubsub
                 {
                     Label = "rush"
                 },
-                Action = null,
+                Action = null
             };
             await client.CreateRuleAsync(topicName, rushSubscription, ruleDescription);
 
@@ -33,35 +34,27 @@ namespace Pubsub
             {
                 Name = "MessagesWithCurrencyCHF",
                 Filter = new SqlFilter("currency = 'CHF'"),
-                Action = new SqlRuleAction("SET currency = 'Złoty'"),
+                Action = new SqlRuleAction("SET currency = 'Złoty'")
             };
             await client.CreateRuleAsync(topicName, currencySubscription, ruleDescription);
 
             await client.CloseAsync();
         }
 
-        private static async Task<ManagementClient> Cleanup(string connectionString, string topicName, string rushSubscription, string currencySubscription)
+        private static async Task<ManagementClient> Cleanup(string connectionString, string topicName,
+            string rushSubscription, string currencySubscription)
         {
             var client = new ManagementClient(connectionString);
 
             if (await client.SubscriptionExistsAsync(topicName, rushSubscription))
-            {
                 await client.DeleteSubscriptionAsync(topicName, rushSubscription);
-            }
 
             if (await client.SubscriptionExistsAsync(topicName, currencySubscription))
-            {
                 await client.DeleteSubscriptionAsync(topicName, currencySubscription);
-            }
 
-            if (await client.TopicExistsAsync(topicName))
-            {
-                await client.DeleteTopicAsync(topicName);
-            }
+            if (await client.TopicExistsAsync(topicName)) await client.DeleteTopicAsync(topicName);
 
-            var topicDescription = new TopicDescription(topicName)
-            {
-            };
+            var topicDescription = new TopicDescription(topicName);
             await client.CreateTopicAsync(topicDescription);
             return client;
         }

@@ -8,10 +8,7 @@ namespace Connections
         public static async Task Stage(string connectionString, string destination)
         {
             var client = new ManagementClient(connectionString);
-            if (!await client.QueueExistsAsync(destination))
-            {
-                await client.CreateQueueAsync(destination);
-            }
+            if (!await client.QueueExistsAsync(destination)) await client.CreateQueueAsync(destination);
             await client.CloseAsync();
         }
 

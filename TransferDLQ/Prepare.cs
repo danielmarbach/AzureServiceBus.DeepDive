@@ -10,16 +10,10 @@ namespace TransferDLQ
         public static async Task Stage(string connectionString, string inputQueue, string destinationQueue)
         {
             var client = new ManagementClient(connectionString);
-            if (await client.QueueExistsAsync(inputQueue))
-            {
-                await client.DeleteQueueAsync(inputQueue);
-            }
-            await client.CreateQueueAsync(new QueueDescription(inputQueue) { MaxDeliveryCount = 1 });
+            if (await client.QueueExistsAsync(inputQueue)) await client.DeleteQueueAsync(inputQueue);
+            await client.CreateQueueAsync(new QueueDescription(inputQueue) {MaxDeliveryCount = 1});
 
-            if (await client.QueueExistsAsync(destinationQueue))
-            {
-                await client.DeleteQueueAsync(destinationQueue);
-            }
+            if (await client.QueueExistsAsync(destinationQueue)) await client.DeleteQueueAsync(destinationQueue);
             await client.CreateQueueAsync(destinationQueue);
 
             await client.CloseAsync();
@@ -49,8 +43,10 @@ namespace TransferDLQ
             await client.CloseAsync();
 
             Console.WriteLine($"#'{info.MessageCountDetails.ActiveMessageCount}' messages in '{destination}'");
-            Console.WriteLine($"#'{info.MessageCountDetails.DeadLetterMessageCount}' messages in '{EntityNameHelper.FormatDeadLetterPath(destination)}'");
-            Console.WriteLine($"#'{info.MessageCountDetails.TransferDeadLetterMessageCount}' messages in '{EntityNameHelper.FormatTransferDeadLetterPath(destination)}'");
+            Console.WriteLine(
+                $"#'{info.MessageCountDetails.DeadLetterMessageCount}' messages in '{EntityNameHelper.FormatDeadLetterPath(destination)}'");
+            Console.WriteLine(
+                $"#'{info.MessageCountDetails.TransferDeadLetterMessageCount}' messages in '{EntityNameHelper.FormatTransferDeadLetterPath(destination)}'");
         }
     }
 }

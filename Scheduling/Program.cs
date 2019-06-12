@@ -6,12 +6,14 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace Scheduling
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string destination = "queue";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static async Task Main(string[] args)
+        private static readonly string destination = "queue";
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, destination);
 
@@ -20,16 +22,18 @@ namespace Scheduling
             await sender.ScheduleMessageAsync(new Message(Encoding.UTF8.GetBytes($"Deep Dive + {due}")), due);
             Console.WriteLine("Message scheduled first");
 
-            var sequenceId = await sender.ScheduleMessageAsync(new Message(Encoding.UTF8.GetBytes($"Deep Dive + {due}")), due);
+            var sequenceId =
+                await sender.ScheduleMessageAsync(new Message(Encoding.UTF8.GetBytes($"Deep Dive + {due}")), due);
             Console.WriteLine("Message scheduled second");
 
             await sender.CancelScheduledMessageAsync(sequenceId);
             Console.WriteLine("Canceled second");
 
             var receiver = new MessageReceiver(connectionString, destination);
-            receiver.RegisterMessageHandler((message, token) => {
-
-                Console.WriteLine($"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}' at '{DateTimeOffset.UtcNow}'");
+            receiver.RegisterMessageHandler((message, token) =>
+            {
+                Console.WriteLine(
+                    $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}' at '{DateTimeOffset.UtcNow}'");
                 return Task.CompletedTask;
             }, ex => Task.CompletedTask);
 

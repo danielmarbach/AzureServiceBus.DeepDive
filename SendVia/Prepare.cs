@@ -9,16 +9,10 @@ namespace SendVia
         public static async Task Stage(string connectionString, string inputQueue, string destinationQueue)
         {
             var client = new ManagementClient(connectionString);
-            if (await client.QueueExistsAsync(inputQueue))
-            {
-                await client.DeleteQueueAsync(inputQueue);
-            }
-            await client.CreateQueueAsync(new QueueDescription(inputQueue) { MaxDeliveryCount = 2 });
+            if (await client.QueueExistsAsync(inputQueue)) await client.DeleteQueueAsync(inputQueue);
+            await client.CreateQueueAsync(new QueueDescription(inputQueue) {MaxDeliveryCount = 2});
 
-            if (await client.QueueExistsAsync(destinationQueue))
-            {
-                await client.DeleteQueueAsync(destinationQueue);
-            }
+            if (await client.QueueExistsAsync(destinationQueue)) await client.DeleteQueueAsync(destinationQueue);
             await client.CreateQueueAsync(destinationQueue);
 
             await client.CloseAsync();

@@ -6,12 +6,14 @@ using Microsoft.Azure.ServiceBus;
 
 namespace Deadlettering
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string destination = "queue";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static async Task Main(string[] args)
+        private static readonly string destination = "queue";
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, destination);
 
@@ -34,28 +36,29 @@ namespace Deadlettering
             await Task.Delay(2000);
 
             client.RegisterMessageHandler(
-            async (msg, token) =>
-            {
-                switch (Encoding.UTF8.GetString(msg.Body))
+                async (msg, token) =>
                 {
-                    case "Half life":
-                        await client.AbandonAsync(msg.SystemProperties.LockToken);
-                        break;
-                    case "Delivery Count":
-                        throw new InvalidOperationException();
-                    case "Poor Soul":
-                        await client.DeadLetterAsync(msg.SystemProperties.LockToken, new Dictionary<string, object> {
-                            { "Reason", "Because we can!" },
-                            { "When", DateTimeOffset.UtcNow },
-                        });
-                        break;
-                }
-            },
-            new MessageHandlerOptions(exception => Task.CompletedTask)
-            {
-                AutoComplete = false,
-                MaxConcurrentCalls = 3
-            });
+                    switch (Encoding.UTF8.GetString(msg.Body))
+                    {
+                        case "Half life":
+                            await client.AbandonAsync(msg.SystemProperties.LockToken);
+                            break;
+                        case "Delivery Count":
+                            throw new InvalidOperationException();
+                        case "Poor Soul":
+                            await client.DeadLetterAsync(msg.SystemProperties.LockToken, new Dictionary<string, object>
+                            {
+                                {"Reason", "Because we can!"},
+                                {"When", DateTimeOffset.UtcNow}
+                            });
+                            break;
+                    }
+                },
+                new MessageHandlerOptions(exception => Task.CompletedTask)
+                {
+                    AutoComplete = false,
+                    MaxConcurrentCalls = 3
+                });
 
             await Task.Delay(5000); // don't do this at home
 

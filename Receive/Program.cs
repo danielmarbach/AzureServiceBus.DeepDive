@@ -5,14 +5,17 @@ using Microsoft.Azure.ServiceBus;
 
 namespace Receive
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string destination = "queue";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static TaskCompletionSource<bool> syncEvent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private static readonly string destination = "queue";
 
-        static async Task Main(string[] args)
+        private static readonly TaskCompletionSource<bool> syncEvent =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, destination);
 
@@ -25,7 +28,8 @@ namespace Receive
                 client.RegisterMessageHandler(
                     async (message, token) =>
                     {
-                        Console.WriteLine($"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                        Console.WriteLine(
+                            $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
                         // throw new InvalidOperationException();
                         await client.CompleteAsync(message.SystemProperties.LockToken);
                         syncEvent.TrySetResult(true);
@@ -48,7 +52,6 @@ namespace Receive
                 );
 
                 await syncEvent.Task;
-
             }
             finally
             {

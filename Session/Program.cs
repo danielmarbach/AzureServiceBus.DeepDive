@@ -6,33 +6,37 @@ using Microsoft.Azure.ServiceBus;
 
 namespace Session
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string destination = "queue";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static TaskCompletionSource<bool> syncEvent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private static readonly string destination = "queue";
 
-        static async Task Main(string[] args)
+        private static TaskCompletionSource<bool> syncEvent =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, destination);
 
             var client = new QueueClient(connectionString, destination);
             try
             {
-                var messages = new List<Message> {
-                    new Message(Encoding.UTF8.GetBytes("Orange 1")) { SessionId = "Orange" },
-                    new Message(Encoding.UTF8.GetBytes("Green 1")) { SessionId = "Green" },
-                    new Message(Encoding.UTF8.GetBytes("Blue 1")) { SessionId = "Blue" },
-                    new Message(Encoding.UTF8.GetBytes("Green 2")) { SessionId = "Green" },
-                    new Message(Encoding.UTF8.GetBytes("Orange 2")) { SessionId = "Orange" },
-                    new Message(Encoding.UTF8.GetBytes("Blue 2")) { SessionId = "Blue" },
-                    new Message(Encoding.UTF8.GetBytes("Green 3")) { SessionId = "Green" },
-                    new Message(Encoding.UTF8.GetBytes("Orange 3")) { SessionId = "Orange" },
-                    new Message(Encoding.UTF8.GetBytes("Green 4")) { SessionId = "Green" },
-                    new Message(Encoding.UTF8.GetBytes("Purple 1")) { SessionId = "Purple" },
-                    new Message(Encoding.UTF8.GetBytes("Blue 3")) { SessionId = "Blue" },
-                    new Message(Encoding.UTF8.GetBytes("Orange 4")) { SessionId = "Orange" },
+                var messages = new List<Message>
+                {
+                    new Message(Encoding.UTF8.GetBytes("Orange 1")) {SessionId = "Orange"},
+                    new Message(Encoding.UTF8.GetBytes("Green 1")) {SessionId = "Green"},
+                    new Message(Encoding.UTF8.GetBytes("Blue 1")) {SessionId = "Blue"},
+                    new Message(Encoding.UTF8.GetBytes("Green 2")) {SessionId = "Green"},
+                    new Message(Encoding.UTF8.GetBytes("Orange 2")) {SessionId = "Orange"},
+                    new Message(Encoding.UTF8.GetBytes("Blue 2")) {SessionId = "Blue"},
+                    new Message(Encoding.UTF8.GetBytes("Green 3")) {SessionId = "Green"},
+                    new Message(Encoding.UTF8.GetBytes("Orange 3")) {SessionId = "Orange"},
+                    new Message(Encoding.UTF8.GetBytes("Green 4")) {SessionId = "Green"},
+                    new Message(Encoding.UTF8.GetBytes("Purple 1")) {SessionId = "Purple"},
+                    new Message(Encoding.UTF8.GetBytes("Blue 3")) {SessionId = "Blue"},
+                    new Message(Encoding.UTF8.GetBytes("Orange 4")) {SessionId = "Orange"}
                 };
 
                 await client.SendAsync(messages);
@@ -41,7 +45,8 @@ namespace Session
                 client.RegisterSessionHandler(
                     (session, message, token) =>
                     {
-                        Console.WriteLine($"Received message on session '{session.SessionId}' with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                        Console.WriteLine(
+                            $"Received message on session '{session.SessionId}' with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
                         return Task.CompletedTask;
                     },
                     new SessionHandlerOptions(
@@ -63,7 +68,6 @@ namespace Session
                 );
 
                 Console.ReadLine();
-
             }
             finally
             {
