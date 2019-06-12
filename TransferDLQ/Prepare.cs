@@ -30,7 +30,11 @@ namespace TransferDLQ
             var client = new ManagementClient(connectionString);
             if (await client.QueueExistsAsync(destinationQueue))
             {
-                await client.DeleteQueueAsync(destinationQueue);
+                var description = new QueueDescription(destinationQueue)
+                {
+                    Status = EntityStatus.SendDisabled
+                };
+                await client.UpdateQueueAsync(description);
             }
 
             await client.CloseAsync();
@@ -44,7 +48,7 @@ namespace TransferDLQ
 
             await client.CloseAsync();
 
-            Console.WriteLine($"#'{info.MessageCount}' messages in '{destination}'");
+            Console.WriteLine($"#'{info.MessageCountDetails.ActiveMessageCount}' messages in '{destination}'");
             Console.WriteLine($"#'{info.MessageCountDetails.DeadLetterMessageCount}' messages in '{EntityNameHelper.FormatDeadLetterPath(destination)}'");
             Console.WriteLine($"#'{info.MessageCountDetails.TransferDeadLetterMessageCount}' messages in '{EntityNameHelper.FormatTransferDeadLetterPath(destination)}'");
         }
