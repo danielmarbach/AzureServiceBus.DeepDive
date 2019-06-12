@@ -50,7 +50,7 @@ namespace Dedup
                     }
                 );
 
-                await Task.Delay(TimeSpan.FromSeconds(20));
+                await Task.Delay(TimeSpan.FromSeconds(25));
 
                 await client.SendAsync(messages);
                 Console.WriteLine("Messages sent");
