@@ -1,7 +1,7 @@
 using System.Threading.Tasks;
 using Microsoft.Azure.ServiceBus.Management;
 
-namespace Send
+namespace Receive
 {
     public static class Prepare
     {
