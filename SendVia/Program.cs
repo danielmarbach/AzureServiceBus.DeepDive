@@ -7,15 +7,18 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace SendVia
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string inputQueue = "queue";
-        static string destinationQueue = "destination";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static TaskCompletionSource<bool> syncEvent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private static readonly string inputQueue = "queue";
+        private static readonly string destinationQueue = "destination";
 
-        static async Task Main(string[] args)
+        private static TaskCompletionSource<bool> syncEvent =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, inputQueue, destinationQueue);
 
@@ -30,23 +33,21 @@ namespace SendVia
             await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
 
             receiver.RegisterMessageHandler(
-                    async (message, token) =>
-                    {
-                        Console.WriteLine($"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                        await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will leak")));
-                        throw new InvalidOperationException();
-                    },
-                    new MessageHandlerOptions(
-                        async exception =>
-                        {
-                            await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
-                        })
-                    {
-                        AutoComplete = false,
-                        MaxConcurrentCalls = 1,
-                        MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
-                    }
-                );
+                async (message, token) =>
+                {
+                    Console.WriteLine(
+                        $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                    await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will leak")));
+                    throw new InvalidOperationException();
+                },
+                new MessageHandlerOptions(
+                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, destinationQueue); })
+                {
+                    AutoComplete = false,
+                    MaxConcurrentCalls = 1,
+                    MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
+                }
+            );
             Console.ReadLine();
             await receiver.CloseAsync();
             await sender.CloseAsync();
@@ -62,38 +63,33 @@ namespace SendVia
 
             // connection has to be shared
             receiver = new MessageReceiver(connection, inputQueue);
-            sender = new MessageSender(connection, entityPath: destinationQueue, viaEntityPath: inputQueue);
+            sender = new MessageSender(connection, destinationQueue, inputQueue);
             receiver.RegisterMessageHandler(
-                    async (message, token) =>
+                async (message, token) =>
+                {
+                    using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
                     {
-                        using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
-                        {
-                            Console.WriteLine($"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                            await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
+                        Console.WriteLine(
+                            $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                        await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
 
-                            if (!message.UserProperties.ContainsKey("Win"))
-                            {
-                                throw new InvalidOperationException();
-                            }
+                        if (!message.UserProperties.ContainsKey("Win")) throw new InvalidOperationException();
 
-                            await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
+                        await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
 
-                            scope.Complete();
-                        }
-
-                        await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
-                    },
-                    new MessageHandlerOptions(
-                        async exception =>
-                        {
-                            await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
-                        })
-                    {
-                        AutoComplete = false,
-                        MaxConcurrentCalls = 1,
-                        MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
+                        scope.Complete();
                     }
-                );
+
+                    await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+                },
+                new MessageHandlerOptions(
+                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, destinationQueue); })
+                {
+                    AutoComplete = false,
+                    MaxConcurrentCalls = 1,
+                    MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
+                }
+            );
             Console.ReadLine();
 
             await receiver.CloseAsync();

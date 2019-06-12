@@ -8,10 +8,7 @@ namespace Batching
         public static async Task Stage(string connectionString, string destination)
         {
             var client = new ManagementClient(connectionString);
-            if (await client.QueueExistsAsync(destination))
-            {
-                await client.DeleteQueueAsync(destination);
-            }
+            if (await client.QueueExistsAsync(destination)) await client.DeleteQueueAsync(destination);
             await client.CreateQueueAsync(destination);
             await client.CloseAsync();
         }

@@ -7,15 +7,18 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace TransferDLQ
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string inputQueue = "queue";
-        static string destinationQueue = "destination";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static TaskCompletionSource<bool> syncEvent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private static readonly string inputQueue = "queue";
+        private static readonly string destinationQueue = "destination";
 
-        static async Task Main(string[] args)
+        private static TaskCompletionSource<bool> syncEvent =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, inputQueue, destinationQueue);
 
@@ -26,33 +29,31 @@ namespace TransferDLQ
             var connection = new ServiceBusConnection(connectionString);
             // connection has to be shared
             var receiver = new MessageReceiver(connection, inputQueue);
-            var sender = new MessageSender(connection, entityPath: destinationQueue, viaEntityPath: inputQueue);
+            var sender = new MessageSender(connection, destinationQueue, inputQueue);
             receiver.RegisterMessageHandler(
-                    async (message, token) =>
+                async (message, token) =>
+                {
+                    using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
                     {
-                        using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
-                        {
-                            Console.WriteLine($"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                            await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
+                        Console.WriteLine(
+                            $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                        await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
 
-                            await Prepare.Hazard(connectionString, destinationQueue);
+                        await Prepare.Hazard(connectionString, destinationQueue);
 
-                            scope.Complete();
-                        }
-
-                        await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
-                    },
-                    new MessageHandlerOptions(
-                        async exception =>
-                        {
-                            await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
-                        })
-                    {
-                        AutoComplete = true,
-                        MaxConcurrentCalls = 1,
-                        MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
+                        scope.Complete();
                     }
-                );
+
+                    await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
+                },
+                new MessageHandlerOptions(
+                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, inputQueue); })
+                {
+                    AutoComplete = true,
+                    MaxConcurrentCalls = 1,
+                    MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
+                }
+            );
             Console.ReadLine();
 
             await Prepare.ReportNumberOfMessages(connectionString, inputQueue);

@@ -9,10 +9,7 @@ namespace Dedup
         public static async Task Stage(string connectionString, string destination)
         {
             var client = new ManagementClient(connectionString);
-            if (await client.QueueExistsAsync(destination))
-            {
-                await client.DeleteQueueAsync(destination);
-            }
+            if (await client.QueueExistsAsync(destination)) await client.DeleteQueueAsync(destination);
             var queueDescription = new QueueDescription(destination)
             {
                 RequiresDuplicateDetection = true,

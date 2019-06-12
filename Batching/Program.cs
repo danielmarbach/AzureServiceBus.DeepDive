@@ -7,33 +7,37 @@ using Microsoft.Azure.ServiceBus;
 
 namespace Batching
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string destination = "queue";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static async Task Main(string[] args)
+        private static readonly string destination = "queue";
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, destination);
 
             var client = new QueueClient(connectionString, destination);
 
             var messages = new List<Message>();
-            for (int i = 0; i < 10; i++)
+            for (var i = 0; i < 10; i++)
             {
                 var message = new Message();
                 message.Body = Encoding.UTF8.GetBytes($"Deep Dive{i}");
                 messages.Add(message);
             }
+
             await client.SendAsync(messages);
             messages.Clear();
 
-            for (int i = 0; i < 6500; i++)
+            for (var i = 0; i < 6500; i++)
             {
                 var message = new Message();
                 message.Body = Encoding.UTF8.GetBytes($"Deep Dive{i}");
                 messages.Add(message);
             }
+
             try
             {
                 await client.SendAsync(messages);
@@ -46,7 +50,7 @@ namespace Batching
             messages.Clear();
             Console.WriteLine();
 
-            for (int i = 0; i < 101; i++)
+            for (var i = 0; i < 101; i++)
             {
                 var message = new Message();
                 message.Body = Encoding.UTF8.GetBytes($"Deep Dive{i}");
@@ -65,7 +69,6 @@ namespace Batching
             {
                 Console.Error.WriteLine(ex.Message);
             }
-
         }
     }
 }

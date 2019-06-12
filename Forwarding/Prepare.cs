@@ -11,14 +11,11 @@ namespace Forwarding
 
             async Task DeleteIfExists(string queueName)
             {
-                if (await client.QueueExistsAsync(queueName))
-                {
-                    await client.DeleteQueueAsync(queueName);
-                }
+                if (await client.QueueExistsAsync(queueName)) await client.DeleteQueueAsync(queueName);
             }
 
             await Task.WhenAll(
-                DeleteIfExists("Hop4"), 
+                DeleteIfExists("Hop4"),
                 DeleteIfExists("Hop3"),
                 DeleteIfExists("Hop2"),
                 DeleteIfExists("Hop1"),
@@ -26,14 +23,10 @@ namespace Forwarding
                 DeleteIfExists("Hop")
             );
 
-            var description = new QueueDescription("Hop")
-            {
-            };
+            var description = new QueueDescription("Hop");
             await client.CreateQueueAsync(description);
 
-            description = new QueueDescription("Hop0")
-            {
-            };
+            description = new QueueDescription("Hop0");
             await client.CreateQueueAsync(description);
 
             description = new QueueDescription("Hop1")

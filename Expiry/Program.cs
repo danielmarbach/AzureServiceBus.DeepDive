@@ -2,16 +2,17 @@
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Management;
 
 namespace Expiry
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string destination = "queue";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static async Task Main(string[] args)
+        private static readonly string destination = "queue";
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, destination);
 

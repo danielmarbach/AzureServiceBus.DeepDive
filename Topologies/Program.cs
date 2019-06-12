@@ -1,24 +1,23 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Azure.ServiceBus;
 using Microsoft.Azure.ServiceBus.Core;
-using Microsoft.Azure.ServiceBus.Management;
 
 namespace Topologies
 {
-    class Program
+    internal class Program
     {
-        static string connectionString = Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
-        static string topicName = "topic";
-        static string rushSubscription = "alwaysInRush";
-        static string currencySubscription = "maybeRich";
+        private static readonly string connectionString =
+            Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        static string inputQueue = "queue";
+        private static readonly string topicName = "topic";
+        private static readonly string rushSubscription = "alwaysInRush";
+        private static readonly string currencySubscription = "maybeRich";
 
-        static async Task Main(string[] args)
+        private static readonly string inputQueue = "queue";
+
+        private static async Task Main(string[] args)
         {
             await Prepare.Stage(connectionString, inputQueue, topicName, rushSubscription, currencySubscription);
 
@@ -38,7 +37,7 @@ namespace Topologies
             try
             {
                 var receivedMessages = await receiver.ReceiveAsync(2);
-                foreach(var receivedMessage in receivedMessages) 
+                foreach (var receivedMessage in receivedMessages)
                 {
                     var body = Encoding.UTF8.GetString(receivedMessage.Body);
                     var label = receivedMessage.Label;
