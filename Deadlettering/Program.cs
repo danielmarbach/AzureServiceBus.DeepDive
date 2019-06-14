@@ -23,15 +23,18 @@ namespace Deadlettering
             message.Body = Encoding.UTF8.GetBytes("Half life");
             message.TimeToLive = TimeSpan.FromSeconds(1);
             await client.SendAsync(message);
+            Console.WriteLine("Sent half life message");
 
             message = new Message();
             message.Body = Encoding.UTF8.GetBytes("Delivery Count");
             await client.SendAsync(message);
+            Console.WriteLine("Sent delivery count message");
 
             message = new Message();
             message.Body = Encoding.UTF8.GetBytes("Poor Soul");
             message.UserProperties.Add("Yehaa", "Why so happy?");
             await client.SendAsync(message);
+            Console.WriteLine("Sent poor soul message");
 
             await Task.Delay(2000);
 
@@ -42,11 +45,15 @@ namespace Deadlettering
                     {
                         case "Half life":
                             await client.AbandonAsync(msg.SystemProperties.LockToken);
+                            Console.WriteLine("Abandon half life message");
                             break;
                         case "Delivery Count":
+                            Console.WriteLine("Throwing delivery count message");
                             throw new InvalidOperationException();
                         case "Poor Soul":
-                            await client.DeadLetterAsync(msg.SystemProperties.LockToken, new Dictionary<string, object>
+                            Console.WriteLine("Dead letter poor soul message");
+                            await client.DeadLetterAsync(msg.SystemProperties.LockToken, 
+                            new Dictionary<string, object>
                             {
                                 {"Reason", "Because we can!"},
                                 {"When", DateTimeOffset.UtcNow}
