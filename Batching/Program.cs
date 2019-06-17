@@ -31,6 +31,7 @@ namespace Batching
             Console.WriteLine($"Sending {messages.Count} messages in a batch.");
             await client.SendAsync(messages);
             messages.Clear();
+            Console.WriteLine();
 
             for (var i = 0; i < 6500; i++)
             {
