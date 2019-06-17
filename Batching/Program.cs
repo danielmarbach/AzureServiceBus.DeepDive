@@ -28,6 +28,7 @@ namespace Batching
                 messages.Add(message);
             }
 
+            Console.WriteLine($"Sending {messages.Count} messages in a batch.");
             await client.SendAsync(messages);
             messages.Clear();
 
@@ -40,6 +41,7 @@ namespace Batching
 
             try
             {
+                Console.WriteLine($"Sending {messages.Count} messages in a batch.");
                 await client.SendAsync(messages);
             }
             catch (MessageSizeExceededException ex)
@@ -61,6 +63,7 @@ namespace Batching
             {
                 using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
                 {
+                    Console.WriteLine($"Sending {messages.Count} messages in a batch with in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'.");
                     await client.SendAsync(messages);
                     scope.Complete();
                 }
