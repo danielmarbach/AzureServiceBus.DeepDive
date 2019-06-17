@@ -40,13 +40,7 @@ namespace SendVia
                     await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will leak")));
                     throw new InvalidOperationException();
                 },
-                new MessageHandlerOptions(
-                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, destinationQueue); })
-                {
-                    AutoComplete = false,
-                    MaxConcurrentCalls = 1,
-                    MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
-                }
+                Prepare.Options(connectionString, destinationQueue)
             );
             Console.ReadLine();
             await receiver.CloseAsync();
@@ -82,13 +76,7 @@ namespace SendVia
 
                     await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
                 },
-                new MessageHandlerOptions(
-                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, destinationQueue); })
-                {
-                    AutoComplete = false,
-                    MaxConcurrentCalls = 1,
-                    MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
-                }
+                Prepare.Options(connectionString, destinationQueue)
             );
             Console.ReadLine();
 
