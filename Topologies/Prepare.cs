@@ -16,6 +16,7 @@ namespace Topologies
                 ForwardTo = inputQueue
             };
             await client.CreateSubscriptionAsync(subscriptionDescription);
+            
             subscriptionDescription = new SubscriptionDescription(topicName, currencySubscription)
             {
                 ForwardTo = inputQueue

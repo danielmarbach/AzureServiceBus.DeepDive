@@ -20,6 +20,7 @@ namespace Pubsub
             await Prepare.Stage(connectionString, topicName, rushSubscription, currencySubscription);
 
             var client = new MessageSender(connectionString, topicName);
+            
             var message = new Message();
             message.Body = Encoding.UTF8.GetBytes("Damn I have not time!");
             message.Label = "rush";
