@@ -10,12 +10,14 @@ namespace Dedup
         {
             var client = new ManagementClient(connectionString);
             if (await client.QueueExistsAsync(destination)) await client.DeleteQueueAsync(destination);
+
             var queueDescription = new QueueDescription(destination)
             {
                 RequiresDuplicateDetection = true,
                 DuplicateDetectionHistoryTimeWindow = TimeSpan.FromSeconds(20)
             };
             await client.CreateQueueAsync(queueDescription);
+            
             await client.CloseAsync();
         }
     }
