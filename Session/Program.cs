@@ -40,6 +40,8 @@ namespace Session
                 };
 
                 await client.SendAsync(messages);
+
+                
                 Console.WriteLine("Messages sent");
 
                 client.RegisterSessionHandler(
