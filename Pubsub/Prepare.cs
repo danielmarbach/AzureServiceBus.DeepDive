@@ -13,6 +13,7 @@ namespace Pubsub
 
             var subscriptionDescription = new SubscriptionDescription(topicName, rushSubscription);
             await client.CreateSubscriptionAsync(subscriptionDescription);
+            
             subscriptionDescription = new SubscriptionDescription(topicName, currencySubscription);
             await client.CreateSubscriptionAsync(subscriptionDescription);
 
@@ -56,6 +57,7 @@ namespace Pubsub
 
             var topicDescription = new TopicDescription(topicName);
             await client.CreateTopicAsync(topicDescription);
+
             return client;
         }
     }
