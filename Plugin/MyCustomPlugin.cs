@@ -6,7 +6,7 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace Plugin
 {
-    internal class MyCustomPlugin : ServiceBusPlugin
+    class MyCustomPlugin : ServiceBusPlugin
     {
         public override string Name => "MyCustomPlugin";
 

@@ -7,11 +7,20 @@ namespace TransferDLQ
 {
     public static class Prepare
     {
+        public static MessageHandlerOptions Options(string connectionString, string inputQueue) =>
+        new MessageHandlerOptions(
+                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, inputQueue); })
+        {
+            AutoComplete = true,
+            MaxConcurrentCalls = 1,
+            MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
+        };
+
         public static async Task Stage(string connectionString, string inputQueue, string destinationQueue)
         {
             var client = new ManagementClient(connectionString);
             if (await client.QueueExistsAsync(inputQueue)) await client.DeleteQueueAsync(inputQueue);
-            await client.CreateQueueAsync(new QueueDescription(inputQueue) {MaxDeliveryCount = 1});
+            await client.CreateQueueAsync(new QueueDescription(inputQueue) { MaxDeliveryCount = 1 });
 
             if (await client.QueueExistsAsync(destinationQueue)) await client.DeleteQueueAsync(destinationQueue);
             await client.CreateQueueAsync(destinationQueue);
@@ -39,14 +48,22 @@ namespace TransferDLQ
             var client = new ManagementClient(connectionString);
 
             var info = await client.GetQueueRuntimeInfoAsync(destination);
+            
+            long activeMessageCount = info.MessageCountDetails.ActiveMessageCount;
+            long deadLetterMessageCount = info.MessageCountDetails.DeadLetterMessageCount;
+            long transferDeadLetterMessageCount = info.MessageCountDetails.TransferDeadLetterMessageCount;
+
+            string destinationDeadLetterPath = EntityNameHelper.FormatDeadLetterPath(destination);
+            string destinationTransferDeadLetterPath = EntityNameHelper.FormatTransferDeadLetterPath(destination);
 
             await client.CloseAsync();
 
-            Console.WriteLine($"#'{info.MessageCountDetails.ActiveMessageCount}' messages in '{destination}'");
+
+            Console.WriteLine($"#'{activeMessageCount}' messages in '{destination}'");
             Console.WriteLine(
-                $"#'{info.MessageCountDetails.DeadLetterMessageCount}' messages in '{EntityNameHelper.FormatDeadLetterPath(destination)}'");
+                $"#'{deadLetterMessageCount}' messages in '{destinationDeadLetterPath}'");
             Console.WriteLine(
-                $"#'{info.MessageCountDetails.TransferDeadLetterMessageCount}' messages in '{EntityNameHelper.FormatTransferDeadLetterPath(destination)}'");
+                $"#'{transferDeadLetterMessageCount}' messages in '{destinationTransferDeadLetterPath}'");
         }
     }
 }

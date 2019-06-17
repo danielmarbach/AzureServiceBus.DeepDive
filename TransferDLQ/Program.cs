@@ -27,7 +27,6 @@ namespace TransferDLQ
             await client.CloseAsync();
 
             var connection = new ServiceBusConnection(connectionString);
-            // connection has to be shared
             var receiver = new MessageReceiver(connection, inputQueue);
             var sender = new MessageSender(connection, destinationQueue, inputQueue);
             receiver.RegisterMessageHandler(
@@ -45,14 +44,7 @@ namespace TransferDLQ
                     }
 
                     await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
-                },
-                new MessageHandlerOptions(
-                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, inputQueue); })
-                {
-                    AutoComplete = true,
-                    MaxConcurrentCalls = 1,
-                    MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
-                }
+                }, Prepare.Options(connectionString, inputQueue)
             );
             Console.ReadLine();
 

@@ -28,12 +28,13 @@ namespace Dedup
 
                 var messages = new List<Message>
                 {
-                    new Message(content) {MessageId = messageId},
-                    new Message(content) {MessageId = messageId},
-                    new Message(content) {MessageId = messageId}
+                    new Message(content) { MessageId = messageId },
+                    new Message(content) { MessageId = messageId },
+                    new Message(content) { MessageId = messageId }
                 };
 
                 await client.SendAsync(messages);
+
                 Console.WriteLine("Messages sent");
 
                 client.RegisterMessageHandler(
