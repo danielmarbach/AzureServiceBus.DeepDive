@@ -33,9 +33,11 @@ namespace AtomicSend
                 Console.WriteLine(
                     $"Sent message 2 in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'");
 
+                Console.WriteLine("About to complete transaction scope.");
                 await Prepare.ReportNumberOfMessages(connectionString, destination);
 
                 scope.Complete();
+                Console.WriteLine("Completed transaction scope.");
             }
 
             await Prepare.ReportNumberOfMessages(connectionString, destination);
