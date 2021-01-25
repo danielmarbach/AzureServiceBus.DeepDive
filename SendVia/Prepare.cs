@@ -7,15 +7,20 @@ namespace SendVia
 {
     public static class Prepare
     {
-        public static MessageHandlerOptions Options(string connectionString, string destinationQueue) => new MessageHandlerOptions(
-                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, destinationQueue); })
+        public static MessageHandlerOptions Options(string connectionString, string destinationQueue, string anotherDestinationQueue) => new MessageHandlerOptions(
+                    async exception =>
+                    {
+                        Console.WriteLine("Failed." + exception.Exception.Message);
+                        await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+                        await Prepare.ReportNumberOfMessages(connectionString, anotherDestinationQueue);
+                    })
         {
             AutoComplete = false,
             MaxConcurrentCalls = 1,
             MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
         };
 
-        public static async Task Stage(string connectionString, string inputQueue, string destinationQueue)
+        public static async Task Stage(string connectionString, string inputQueue, string destinationQueue, string anotherDestinationQueue)
         {
             var client = new ManagementClient(connectionString);
             if (await client.QueueExistsAsync(inputQueue)) await client.DeleteQueueAsync(inputQueue);
@@ -23,6 +28,8 @@ namespace SendVia
 
             if (await client.QueueExistsAsync(destinationQueue)) await client.DeleteQueueAsync(destinationQueue);
             await client.CreateQueueAsync(destinationQueue);
+            if (await client.QueueExistsAsync(anotherDestinationQueue)) await client.DeleteQueueAsync(anotherDestinationQueue);
+            await client.CreateQueueAsync(anotherDestinationQueue);
 
             await client.CloseAsync();
         }
