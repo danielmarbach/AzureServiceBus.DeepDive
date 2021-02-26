@@ -1,8 +1,6 @@
-﻿using System;
-using System.Text;
+using System;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Core;
+using Azure.Messaging.ServiceBus;
 
 namespace Connections
 {
@@ -15,39 +13,38 @@ namespace Connections
 
         private static async Task Main(string[] args)
         {
-            await Prepare.Stage(connectionString, destination);
+            await using var stage = await Prepare.Stage(connectionString, destination);
 
             Console.WriteLine("netstat -na | find \"5671\"");
 
-            var sender = new MessageSender(connectionString, destination);
-            await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Deep Dive")));
-            var receiver = new MessageReceiver(connectionString, destination);
-            await receiver.ReceiveAsync();
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
+            await using var connectionSharingSender = serviceBusClient.CreateSender(destination);
+            await connectionSharingSender.SendMessageAsync(new ServiceBusMessage("Deep Dive"));
+            await using var connectionSharingReceiver = serviceBusClient.CreateReceiver(destination);
+            await connectionSharingReceiver.ReceiveMessageAsync();
 
-            Console.WriteLine("Continue with connection sharing");
+            Console.WriteLine("Continue with a dedicated connection");
             Console.ReadLine();
 
-            await sender.CloseAsync();
-            await receiver.CloseAsync();
-            sender = null;
-            receiver = null;
+            await connectionSharingSender.CloseAsync();
+            await connectionSharingSender.DisposeAsync();
+            await connectionSharingReceiver.CloseAsync();
+            await connectionSharingReceiver.DisposeAsync();
+            await serviceBusClient.DisposeAsync();
 
             GC.Collect();
 
-            var connection = new ServiceBusConnection(connectionString);
-            sender = new MessageSender(connection, destination);
-            receiver = new MessageReceiver(connection, destination);
+            await using var senderServiceBusClient = new ServiceBusClient(connectionString);
+            await using var receiverServiceBusClient = new ServiceBusClient(connectionString);
 
-            await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Deep Dive")));
-            await receiver.ReceiveAsync();
+            await using var senderWithDedicatedConnection = senderServiceBusClient.CreateSender(destination);
+            await using var receiverWithDedicatedConnection = receiverServiceBusClient.CreateReceiver(destination);
+
+            await senderWithDedicatedConnection.SendMessageAsync(new ServiceBusMessage("Deep Dive"));
+            await receiverWithDedicatedConnection.ReceiveMessageAsync();
 
             Console.WriteLine("Enter to stop");
             Console.ReadLine();
-
-            await sender.CloseAsync();
-            await receiver.CloseAsync();
-
-            await Prepare.LeaveStage(connectionString, destination);
         }
     }
 }
