@@ -1,10 +1,9 @@
+using System;
 using System.Threading.Tasks;
 using Microsoft.Azure.ServiceBus.Management;
 
 namespace Receive
 {
-    using System;
-
     public static class Prepare
     {
         public static async Task<IAsyncDisposable> Stage(string connectionString, string destination)
