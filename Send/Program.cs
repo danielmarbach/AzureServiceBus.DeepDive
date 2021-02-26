@@ -1,7 +1,6 @@
 ﻿using System;
-using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
+using Azure.Messaging.ServiceBus;
 
 namespace Send
 {
@@ -16,21 +15,15 @@ namespace Send
         {
             await Prepare.Stage(connectionString, destination);
 
-            var client = new QueueClient(connectionString, destination);
-            try
-            {
-                var message = new Message();
-                message.Body = Encoding.UTF8.GetBytes("Deep Dive");
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
 
-                message.UserProperties.Add("TenantId", "MyTenantId");
-                // explore a few more properties
+            await using var client = serviceBusClient.CreateSender(destination);
+            var message = new ServiceBusMessage("Deep Dive");
 
-                await client.SendAsync(message);
-            }
-            finally
-            {
-                await client.CloseAsync();
-            }
+            message.ApplicationProperties.Add("TenantId", "MyTenantId");
+            // explore a few more properties
+
+            await client.SendMessageAsync(message);
         }
     }
 }
