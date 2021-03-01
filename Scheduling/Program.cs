@@ -6,6 +6,9 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace Scheduling
 {
+    using System.Threading;
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -13,36 +16,45 @@ namespace Scheduling
 
         private static readonly string destination = "queue";
 
+        private static readonly TaskCompletionSource<bool> syncEvent =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
         private static async Task Main(string[] args)
         {
-            await Prepare.Stage(connectionString, destination);
+            await using var stage = await Prepare.Stage(connectionString, destination);
 
-            var sender = new MessageSender(connectionString, destination);
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
+
+            await using var sender = serviceBusClient.CreateSender(destination);
+
             var due = DateTimeOffset.UtcNow.AddSeconds(10);
-            await sender.ScheduleMessageAsync(new Message(Encoding.UTF8.GetBytes($"Deep Dive + {due}")), due);
+            await sender.ScheduleMessageAsync(new ServiceBusMessage($"Deep Dive + {due}"), due);
             Console.WriteLine($"{DateTimeOffset.UtcNow}: Message scheduled first");
 
             var sequenceId =
-                await sender.ScheduleMessageAsync(new Message(Encoding.UTF8.GetBytes($"Deep Dive + {due}")), due);
+                await sender.ScheduleMessageAsync(new ServiceBusMessage($"Deep Dive + {due}"), due);
             Console.WriteLine($"{DateTimeOffset.UtcNow}: Message scheduled second");
 
             await sender.CancelScheduledMessageAsync(sequenceId);
             Console.WriteLine($"{DateTimeOffset.UtcNow}: Canceled second");
 
-            var receiver = new MessageReceiver(connectionString, destination);
-            receiver.RegisterMessageHandler((message, token) =>
+            await using var receiver = serviceBusClient.CreateProcessor(destination, new ServiceBusProcessorOptions { ReceiveMode = ServiceBusReceiveMode.ReceiveAndDelete });
+            receiver.ProcessMessageAsync += async processMessageEventArgs =>
             {
-                Console.WriteLine(
+                var message = processMessageEventArgs.Message;
+
+                await Console.Error.WriteLineAsync(
                     $"{DateTimeOffset.UtcNow}: Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                return Task.CompletedTask;
-            }, ex => Task.CompletedTask);
 
+                syncEvent.TrySetResult(true);
+            };
+            receiver.ProcessErrorAsync += processErrorEventArgs => Task.CompletedTask;
 
-            await Task.Delay(TimeSpan.FromSeconds(20));
-            await sender.CloseAsync();
-            await receiver.CloseAsync();
+            await receiver.StartProcessingAsync();
 
-            await Prepare.LeaveStage(connectionString, destination);
+            await syncEvent.Task;
+
+            await receiver.StopProcessingAsync();
         }
     }
 }
