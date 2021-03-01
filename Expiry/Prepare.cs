@@ -5,6 +5,9 @@ using Microsoft.Azure.ServiceBus.Management;
 
 namespace Expiry
 {
+    using System.Threading;
+    using Azure.Messaging.ServiceBus;
+
     public static class Prepare
     {
         public static async Task Stage(string connectionString, string destination)
@@ -17,24 +20,25 @@ namespace Expiry
                 MaxDeliveryCount = int.MaxValue
             };
             await client.CreateQueueAsync(description);
-
             await client.CloseAsync();
         }
 
-        public static async Task SimulateActiveReceiver(QueueClient client)
+        public static async Task SimulateActiveReceiver(ServiceBusClient serviceBusClient, string destination)
         {
-            client.RegisterMessageHandler(
-                async (message, token) =>
-                {
-                    await client.AbandonAsync(message.SystemProperties.LockToken);
-                    await Task.Delay(2000, token);
-                },
-                new MessageHandlerOptions(exception => Task.CompletedTask)
-                {
-                    AutoComplete = false
-                });
+            await using var receiver = serviceBusClient.CreateProcessor(destination, new ServiceBusProcessorOptions { AutoCompleteMessages = false });
+            receiver.ProcessMessageAsync += async processMessageEventArgs =>
+            {
+                await processMessageEventArgs.AbandonMessageAsync(processMessageEventArgs.Message);
+                await Console.Error.WriteAsync(".");
+                await Task.Delay(2000, processMessageEventArgs.CancellationToken);
+            };
+            receiver.ProcessErrorAsync += _ => Task.CompletedTask;
 
-            await Task.Delay(TimeSpan.FromSeconds(15));
+            await receiver.StartProcessingAsync();
+
+            await Task.Delay(TimeSpan.FromSeconds(11));
+
+            await receiver.StopProcessingAsync();
         }
     }
 }
