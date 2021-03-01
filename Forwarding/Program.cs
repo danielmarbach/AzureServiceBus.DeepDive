@@ -6,6 +6,8 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace Forwarding
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -15,19 +17,20 @@ namespace Forwarding
         {
             await Prepare.Stage(connectionString);
 
-            var client = new QueueClient(connectionString, "Hop4");
-            var message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("Weeeeeeehhh!");
-            await client.SendAsync(message);
-            await client.CloseAsync();
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
+            var sender = serviceBusClient.CreateSender("Hop4");
+
+            var message = new ServiceBusMessage("Weeeeeeehhh!");
+            await sender.SendMessageAsync(message);
+            await sender.CloseAsync();
 
             Console.WriteLine("Sent message");
 
             var hop = "Hop0";
-            var receiver = new MessageReceiver(connectionString, hop);
+            var receiver = serviceBusClient.CreateReceiver(hop);
 
-            var receivedMessage = await receiver.ReceiveAsync();
-            await receiver.CompleteAsync(receivedMessage.SystemProperties.LockToken);
+            var receivedMessage = await receiver.ReceiveMessageAsync();
+            await receiver.CompleteMessageAsync(receivedMessage);
 
             Console.WriteLine($"Got '{Encoding.UTF8.GetString(receivedMessage.Body)}' on hop '{hop}'");
             await receiver.CloseAsync();
@@ -35,20 +38,19 @@ namespace Forwarding
             Console.WriteLine("Setup forwarding from Hop0 to Hop");
             Console.ReadLine();
 
-            client = new QueueClient(connectionString, "Hop4");
-            message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("Weeeeeeehhh!");
-            await client.SendAsync(message);
+            sender = serviceBusClient.CreateSender("Hop4");
+            message = new ServiceBusMessage("Weeeeeeehhh!");
+            await sender.SendMessageAsync(message);
 
             hop = "Hop0";
-            receiver = new MessageReceiver(connectionString, hop);
+            receiver = serviceBusClient.CreateReceiver(hop);
             try
             {
-                receivedMessage = await receiver.ReceiveAsync();
+                receivedMessage = await receiver.ReceiveMessageAsync();
             }
             catch (InvalidOperationException ex)
             {
-                Console.Error.WriteLine(ex.Message);
+                await Console.Error.WriteLineAsync(ex.Message);
             }
             finally
             {
