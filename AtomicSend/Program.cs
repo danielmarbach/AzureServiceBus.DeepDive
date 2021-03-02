@@ -6,6 +6,8 @@ using Microsoft.Azure.ServiceBus;
 
 namespace AtomicSend
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -17,19 +19,21 @@ namespace AtomicSend
         {
             await Prepare.Stage(connectionString, destination);
 
-            var client = new QueueClient(connectionString, destination);
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
+
+            await using var sender = serviceBusClient.CreateSender(destination);
 
             using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
             {
-                var message = new Message(Encoding.UTF8.GetBytes("Deep Dive 1"));
-                await client.SendAsync(message);
+                var message = new ServiceBusMessage("Deep Dive 1");
+                await sender.SendMessageAsync(message);
                 Console.WriteLine(
                     $"Sent message 1 in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'");
 
                 await Prepare.ReportNumberOfMessages(connectionString, destination);
 
-                message = new Message(Encoding.UTF8.GetBytes("Deep Dive 2"));
-                await client.SendAsync(message);
+                message = new ServiceBusMessage("Deep Dive 2");
+                await sender.SendMessageAsync(message);
                 Console.WriteLine(
                     $"Sent message 2 in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'");
 
@@ -41,8 +45,6 @@ namespace AtomicSend
             }
 
             await Prepare.ReportNumberOfMessages(connectionString, destination);
-
-            await client.CloseAsync();
         }
     }
 }
