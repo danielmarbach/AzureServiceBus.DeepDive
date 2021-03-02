@@ -7,6 +7,8 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace SendVia
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -22,67 +24,86 @@ namespace SendVia
         {
             await Prepare.Stage(connectionString, inputQueue, destinationQueue);
 
-            var client = new QueueClient(connectionString, inputQueue);
-            await client.SendAsync(new Message(Encoding.UTF8.GetBytes("Kick off")));
-            await client.CloseAsync();
+            await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
+            {
+                RetryOptions = new ServiceBusRetryOptions
+                {
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
+            await using var kickOffSender = serviceBusClient.CreateSender(inputQueue);
 
-            var connection = new ServiceBusConnection(connectionString);
-            var receiver = new MessageReceiver(connection, inputQueue);
-            var sender = new MessageSender(connection, destinationQueue);
+            await kickOffSender.SendMessageAsync(new ServiceBusMessage("Kick off"));
+
+            var receiver = serviceBusClient.CreateProcessor(inputQueue);
+            var sender = serviceBusClient.CreateSender(destinationQueue);
 
             await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
 
-            receiver.RegisterMessageHandler(
-                async (message, token) =>
-                {
-                    Console.WriteLine(
-                        $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                    await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will leak")));
-                    throw new InvalidOperationException();
-                },
-                Prepare.Options(connectionString, destinationQueue)
-            );
+            receiver.ProcessMessageAsync += async processMessageEventArgs =>
+            {
+                var message = processMessageEventArgs.Message;
+
+                await Console.Error.WriteLineAsync(
+                    $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                await sender.SendMessageAsync(new ServiceBusMessage("Will leak"));
+                throw new InvalidOperationException();
+            };
+            receiver.ProcessErrorAsync += _ => Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+
+            await receiver.StartProcessingAsync();
+
             Console.ReadLine();
+            await receiver.StopProcessingAsync();
             await receiver.CloseAsync();
             await sender.CloseAsync();
 
             await Prepare.Stage(connectionString, inputQueue, destinationQueue);
 
-            client = new QueueClient(connectionString, inputQueue);
-            await client.SendAsync(new Message(Encoding.UTF8.GetBytes("Fail")));
-            var winMessage = new Message(Encoding.UTF8.GetBytes("Win"));
-            winMessage.UserProperties.Add("Win", true);
-            await client.SendAsync(winMessage);
-            await client.CloseAsync();
+            await kickOffSender.SendMessageAsync(new ServiceBusMessage("Fail"));
+            var winMessage = new ServiceBusMessage("Win");
+            winMessage.ApplicationProperties.Add("Win", true);
+            await kickOffSender.SendMessageAsync(winMessage);
+            await kickOffSender.CloseAsync();
 
-            // connection has to be shared
-            receiver = new MessageReceiver(connection, inputQueue);
-            sender = new MessageSender(connection, destinationQueue, inputQueue);
-            receiver.RegisterMessageHandler(
-                async (message, token) =>
+            await using var transactionalClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
+            {
+                EnableCrossEntityTransactions = true,
+                RetryOptions = new ServiceBusRetryOptions
                 {
-                    using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
-                    {
-                        Console.WriteLine(
-                            $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                        await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
+            receiver = transactionalClient.CreateProcessor(inputQueue);
+            sender = transactionalClient.CreateSender(destinationQueue);
 
-                        if (!message.UserProperties.ContainsKey("Win")) throw new InvalidOperationException();
+            receiver.ProcessMessageAsync += async processMessageEventArgs =>
+            {
+                var message = processMessageEventArgs.Message;
+                using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+                {
+                    Console.WriteLine(
+                        $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                    await sender.SendMessageAsync(new ServiceBusMessage("Will not leak"));
 
-                        await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
+                    if (!message.ApplicationProperties.ContainsKey("Win")) throw new InvalidOperationException();
 
-                        scope.Complete();
-                    }
+                    await sender.SendMessageAsync(new ServiceBusMessage("Will not leak"));
 
-                    await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
-                },
-                Prepare.Options(connectionString, destinationQueue)
-            );
+                    scope.Complete();
+                }
+
+                await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+            };
+            receiver.ProcessErrorAsync += _ => Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+
+            await receiver.StartProcessingAsync();
+
             Console.ReadLine();
 
+            await receiver.StopProcessingAsync();
             await receiver.CloseAsync();
             await sender.CloseAsync();
-            await connection.CloseAsync();
         }
     }
 }
