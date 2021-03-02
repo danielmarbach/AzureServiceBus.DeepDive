@@ -48,7 +48,7 @@ namespace Scheduling
 
                 syncEvent.TrySetResult(true);
             };
-            receiver.ProcessErrorAsync += processErrorEventArgs => Task.CompletedTask;
+            receiver.ProcessErrorAsync += _ => Task.CompletedTask;
 
             await receiver.StartProcessingAsync();
 
