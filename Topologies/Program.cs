@@ -6,6 +6,8 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace Topologies
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -21,37 +23,27 @@ namespace Topologies
         {
             await Prepare.Stage(connectionString, inputQueue, topicName, rushSubscription, currencySubscription);
 
-            var client = new MessageSender(connectionString, topicName);
-            var message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("Damn I have not time!");
-            message.Label = "rush";
-            await client.SendAsync(message);
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
+            await using var sender = serviceBusClient.CreateSender(topicName);
 
-            message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("I'm rich! I have 1000");
-            message.UserProperties.Add("currency", "CHF");
-            await client.SendAsync(message);
-            await client.CloseAsync();
+            var message = new ServiceBusMessage("Damn I have no time!")
+            {
+                Subject = "rush"
+            };
+            await sender.SendMessageAsync(message);
 
-            var receiver = new MessageReceiver(connectionString, inputQueue);
-            try
+            message = new ServiceBusMessage("I'm rich! I have 1000");
+            message.ApplicationProperties.Add("currency", "CHF");
+            await sender.SendMessageAsync(message);
+
+            await using var receiver = serviceBusClient.CreateReceiver(inputQueue);
+            var receivedMessages = await receiver.ReceiveMessagesAsync(2);
+            foreach (var receivedMessage in receivedMessages)
             {
-                var receivedMessages = await receiver.ReceiveAsync(2);
-                foreach (var receivedMessage in receivedMessages)
-                {
-                    var body = Encoding.UTF8.GetString(receivedMessage.Body);
-                    var label = receivedMessage.Label;
-                    receivedMessage.UserProperties.TryGetValue("currency", out var currency);
-                    Console.WriteLine($"{body} / Label = '{label}' / Currency = '{currency}'");
-                }
-            }
-            catch (InvalidOperationException ex)
-            {
-                Console.Error.WriteLine(ex.Message);
-            }
-            finally
-            {
-                await receiver.CloseAsync();
+                var body = Encoding.UTF8.GetString(receivedMessage.Body);
+                var label = receivedMessage.Subject;
+                receivedMessage.ApplicationProperties.TryGetValue("currency", out var currency);
+                Console.WriteLine($"{body} / Label = '{label}' / Currency = '{currency}'");
             }
         }
     }
