@@ -6,6 +6,8 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace Pubsub
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -19,19 +21,18 @@ namespace Pubsub
         {
             await Prepare.Stage(connectionString, topicName, rushSubscription, currencySubscription);
 
-            var client = new MessageSender(connectionString, topicName);
-            
-            var message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("Damn I have not time!");
-            message.Label = "rush";
-            await client.SendAsync(message);
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
+            await using var sender = serviceBusClient.CreateSender(topicName);
 
-            message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("I'm rich! I have 1000");
-            message.UserProperties.Add("currency", "CHF");
-            await client.SendAsync(message);
+            var message = new ServiceBusMessage("Damn I have no time!")
+            {
+                Subject = "rush"
+            };
+            await sender.SendMessageAsync(message);
 
-            await client.CloseAsync();
+            message = new ServiceBusMessage("I'm rich! I have 1000");
+            message.ApplicationProperties.Add("currency", "CHF");
+            await sender.SendMessageAsync(message);
 
             Console.WriteLine("Sent message");
         }
