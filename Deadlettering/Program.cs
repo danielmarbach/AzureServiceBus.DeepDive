@@ -19,7 +19,13 @@ namespace Deadlettering
         {
             await Prepare.Stage(connectionString, destination);
 
-            await using var serviceBusClient = new ServiceBusClient(connectionString);
+            await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
+            {
+                RetryOptions = new ServiceBusRetryOptions
+                {
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
 
             await using var sender = serviceBusClient.CreateSender(destination);
 
