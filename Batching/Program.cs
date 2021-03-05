@@ -7,6 +7,8 @@ using Microsoft.Azure.ServiceBus;
 
 namespace Batching
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -16,38 +18,38 @@ namespace Batching
 
         private static async Task Main(string[] args)
         {
-            await Prepare.Stage(connectionString, destination);
+            await using var stage = await Prepare.Stage(connectionString, destination);
 
-            var client = new QueueClient(connectionString, destination);
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
 
-            var messages = new List<Message>();
+            await using var sender = serviceBusClient.CreateSender(destination);
+
+            var messages = new List<ServiceBusMessage>();
             for (var i = 0; i < 10; i++)
             {
-                var message = new Message();
-                message.Body = Encoding.UTF8.GetBytes($"Deep Dive{i}");
+                var message = new ServiceBusMessage("Deep Dive{i}");
                 messages.Add(message);
             }
 
             Console.WriteLine($"Sending {messages.Count} messages in a batch.");
-            await client.SendAsync(messages);
+            await sender.SendMessagesAsync(messages);
             messages.Clear();
             Console.WriteLine();
 
             for (var i = 0; i < 6500; i++)
             {
-                var message = new Message();
-                message.Body = Encoding.UTF8.GetBytes($"Deep Dive{i}");
+                var message = new ServiceBusMessage($"Deep Dive{i}");
                 messages.Add(message);
             }
 
             try
             {
                 Console.WriteLine($"Sending {messages.Count} messages in a batch.");
-                await client.SendAsync(messages);
+                await sender.SendMessagesAsync(messages);
             }
-            catch (MessageSizeExceededException ex)
+            catch (ServiceBusException ex) when(ex.Reason == ServiceBusFailureReason.MessageSizeExceeded)
             {
-                Console.Error.WriteLine(ex.Message);
+                await Console.Error.WriteLineAsync(ex.Message);
             }
 
             messages.Clear();
@@ -55,8 +57,7 @@ namespace Batching
 
             for (var i = 0; i < 101; i++)
             {
-                var message = new Message();
-                message.Body = Encoding.UTF8.GetBytes($"Deep Dive{i}");
+                var message = new ServiceBusMessage($"Deep Dive{i}");
                 messages.Add(message);
             }
 
@@ -65,13 +66,44 @@ namespace Batching
                 using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
                 {
                     Console.WriteLine($"Sending {messages.Count} messages in a batch with in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'.");
-                    await client.SendAsync(messages);
+                    await sender.SendMessagesAsync(messages);
                     scope.Complete();
                 }
             }
-            catch (QuotaExceededException ex)
+            catch (ServiceBusException ex) when(ex.Reason == ServiceBusFailureReason.QuotaExceeded)
             {
-                Console.Error.WriteLine(ex.Message);
+                await Console.Error.WriteLineAsync(ex.Message);
+            }
+
+            var messagesToSend = new Queue<ServiceBusMessage>();
+            for (var i = 0; i < 4500; i++)
+            {
+                var message = new ServiceBusMessage($"Deep Dive{i}. Deep Dive{i}. Deep Dive{i}.");
+                messagesToSend.Enqueue(message);
+            }
+
+            var messageCount = messagesToSend.Count;
+            int batchCount = 1;
+            while (messagesToSend.Count > 0)
+            {
+                using ServiceBusMessageBatch messageBatch = await sender.CreateMessageBatchAsync();
+
+                if (messageBatch.TryAddMessage(messagesToSend.Peek()))
+                {
+                    messagesToSend.Dequeue();
+                }
+                else
+                {
+                    throw new Exception($"Message {messageCount - messagesToSend.Count} is too large and cannot be sent.");
+                }
+
+                while (messagesToSend.Count > 0 && messageBatch.TryAddMessage(messagesToSend.Peek()))
+                {
+                    messagesToSend.Dequeue();
+                }
+
+                Console.WriteLine($"Sending {messageBatch.Count} messages in a batch {batchCount++}.");
+                await sender.SendMessagesAsync(messageBatch);
             }
         }
     }

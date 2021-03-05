@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
 
 namespace Receive
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -17,47 +18,54 @@ namespace Receive
 
         private static async Task Main(string[] args)
         {
-            await Prepare.Stage(connectionString, destination);
+            await using var stage = await Prepare.Stage(connectionString, destination);
 
-            var client = new QueueClient(connectionString, destination);
-            try
+            await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
             {
-                await client.SendAsync(new Message(Encoding.UTF8.GetBytes("Deep Dive")));
-                Console.WriteLine("Message sent");
+                RetryOptions = new ServiceBusRetryOptions
+                {
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
 
-                client.RegisterMessageHandler(
-                    async (message, token) =>
-                    {
-                        Console.WriteLine(
-                            $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                        // throw new InvalidOperationException();
-                        await client.CompleteAsync(message.SystemProperties.LockToken);
-                        syncEvent.TrySetResult(true);
-                    },
-                    new MessageHandlerOptions(
-                        exception =>
-                        {
-                            Console.WriteLine($"Exception: {exception.Exception}");
-                            Console.WriteLine($"Action: {exception.ExceptionReceivedContext.Action}");
-                            Console.WriteLine($"ClientId: {exception.ExceptionReceivedContext.ClientId}");
-                            Console.WriteLine($"Endpoint: {exception.ExceptionReceivedContext.Endpoint}");
-                            Console.WriteLine($"EntityPath: {exception.ExceptionReceivedContext.EntityPath}");
-                            return Task.CompletedTask;
-                        })
-                    {
-                        AutoComplete = false,
-                        MaxConcurrentCalls = 1,
-                        MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
-                    }
-                );
+            await using var sender = serviceBusClient.CreateSender(destination);
+            await sender.SendMessageAsync(new ServiceBusMessage(Encoding.UTF8.GetBytes("Deep Dive")));
+            Console.WriteLine("Message sent");
 
-                await syncEvent.Task;
-            }
-            finally
+            var processorOptions = new ServiceBusProcessorOptions {
+                    AutoCompleteMessages  = false,
+                    MaxConcurrentCalls = 1,
+                    MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(10)
+            };
+
+            await using var receiver = serviceBusClient.CreateProcessor(destination, processorOptions);
+
+            async Task MessageHandler(ProcessMessageEventArgs args)
             {
-                await client.CloseAsync();
-                await Prepare.LeaveStage(connectionString, destination);
+                Console.WriteLine(
+                    $"Received message with '{args.Message.MessageId}' and content '{Encoding.UTF8.GetString(args.Message.Body)}'");
+                // throw new InvalidOperationException();
+                await args.CompleteMessageAsync(args.Message);
+                syncEvent.TrySetResult(true);
             }
+
+            Task ErrorHandler(ProcessErrorEventArgs args)
+            {
+                Console.WriteLine($"Exception: {args.Exception}");
+                Console.WriteLine($"FullyQualifiedNamespace: {args.FullyQualifiedNamespace}");
+                Console.WriteLine($"ErrorSource: {args.ErrorSource}");
+                Console.WriteLine($"EntityPath: {args.EntityPath}");
+                return Task.CompletedTask;
+            }
+
+            receiver.ProcessMessageAsync += MessageHandler;
+            receiver.ProcessErrorAsync += ErrorHandler;
+
+            await receiver.StartProcessingAsync();
+
+            await syncEvent.Task;
+
+            await receiver.StopProcessingAsync();
         }
     }
 }

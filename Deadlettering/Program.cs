@@ -6,6 +6,8 @@ using Microsoft.Azure.ServiceBus;
 
 namespace Deadlettering
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -17,59 +19,68 @@ namespace Deadlettering
         {
             await Prepare.Stage(connectionString, destination);
 
-            var client = new QueueClient(connectionString, destination);
+            await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
+            {
+                RetryOptions = new ServiceBusRetryOptions
+                {
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
 
-            var message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("Half life");
-            message.TimeToLive = TimeSpan.FromSeconds(1);
-            await client.SendAsync(message);
+            await using var sender = serviceBusClient.CreateSender(destination);
+
+            var message = new ServiceBusMessage("Half life") { TimeToLive = TimeSpan.FromSeconds(1) };
+            await sender.SendMessageAsync(message);
             Console.WriteLine("Sent half life message");
 
-            message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("Delivery Count");
-            await client.SendAsync(message);
+            message = new ServiceBusMessage("Delivery Count");
+            await sender.SendMessageAsync(message);
             Console.WriteLine("Sent delivery count message");
 
-            message = new Message();
-            message.Body = Encoding.UTF8.GetBytes("Poor Soul");
-            message.UserProperties.Add("Yehaa", "Why so happy?");
-            await client.SendAsync(message);
+            message = new ServiceBusMessage("Poor Soul");
+            message.ApplicationProperties.Add("Yehaa", "Why so happy?");
+            await sender.SendMessageAsync(message);
             Console.WriteLine("Sent poor soul message");
 
             await Task.Delay(2000);
 
-            client.RegisterMessageHandler(
-                async (msg, token) =>
+            await using var receiver = serviceBusClient.CreateProcessor(destination, new ServiceBusProcessorOptions
+            {
+                AutoCompleteMessages =  false,
+                MaxConcurrentCalls = 3
+            });
+
+            receiver.ProcessMessageAsync += async processMessageEventArgs =>
+            {
+                var message = processMessageEventArgs.Message;
+                switch (Encoding.UTF8.GetString(message.Body))
                 {
-                    switch (Encoding.UTF8.GetString(msg.Body))
-                    {
-                        case "Half life":
-                            await client.AbandonAsync(msg.SystemProperties.LockToken);
-                            Console.WriteLine("Abandon half life message");
-                            break;
-                        case "Delivery Count":
-                            Console.WriteLine("Throwing delivery count message");
-                            throw new InvalidOperationException();
-                        case "Poor Soul":
-                            Console.WriteLine("Dead letter poor soul message");
-                            await client.DeadLetterAsync(msg.SystemProperties.LockToken, 
+                    case "Half life":
+                        await processMessageEventArgs.AbandonMessageAsync(message);
+                        await Console.Error.WriteLineAsync("Abandon half life message");
+                        break;
+                    case "Delivery Count":
+                        await Console.Error.WriteLineAsync("Throwing delivery count message");
+                        throw new InvalidOperationException();
+                    case "Poor Soul":
+                        await Console.Error.WriteLineAsync("Dead letter poor soul message");
+                        await processMessageEventArgs.DeadLetterMessageAsync(message,
                             new Dictionary<string, object>
                             {
                                 {"Reason", "Because we can!"},
                                 {"When", DateTimeOffset.UtcNow}
                             });
-                            break;
-                    }
-                },
-                new MessageHandlerOptions(exception => Task.CompletedTask)
-                {
-                    AutoComplete = false,
-                    MaxConcurrentCalls = 3
-                });
+                        break;
+                }
+            };
+            receiver.ProcessErrorAsync += _ => Task.CompletedTask;
+            await receiver.StartProcessingAsync();
 
             await Task.Delay(5000); // don't do this at home
 
-            await client.CloseAsync();
+            await receiver.StopProcessingAsync();
+
+            await receiver.CloseAsync();
         }
     }
 }

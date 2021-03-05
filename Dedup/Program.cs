@@ -6,6 +6,8 @@ using Microsoft.Azure.ServiceBus;
 
 namespace Dedup
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -20,53 +22,52 @@ namespace Dedup
         {
             await Prepare.Stage(connectionString, destination);
 
-            var client = new QueueClient(connectionString, destination);
-            try
+            await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
             {
-                var content = Encoding.UTF8.GetBytes("Message1Message1");
-                var messageId = new Guid(content).ToString();
-
-                var messages = new List<Message>
+                RetryOptions = new ServiceBusRetryOptions
                 {
-                    new Message(content) { MessageId = messageId },
-                    new Message(content) { MessageId = messageId },
-                    new Message(content) { MessageId = messageId }
-                };
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
 
-                await client.SendAsync(messages);
+            await using var sender = serviceBusClient.CreateSender(destination);
 
-                Console.WriteLine("Messages sent");
+            var content = Encoding.UTF8.GetBytes("Message1Message1");
+            var messageId = new Guid(content).ToString();
 
-                client.RegisterMessageHandler(
-                    (message, token) =>
-                    {
-                        Console.WriteLine(
-                            $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                        return Task.CompletedTask;
-                    },
-                    new MessageHandlerOptions(
-                        exception =>
-                        {
-                            Console.WriteLine($"Exception: {exception.Exception}");
-                            return Task.CompletedTask;
-                        })
-                    {
-                        AutoComplete = true,
-                        MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
-                    }
-                );
-
-                await Task.Delay(TimeSpan.FromSeconds(25));
-
-                await client.SendAsync(messages);
-                Console.WriteLine("Messages sent");
-
-                Console.ReadLine();
-            }
-            finally
+            var messages = new List<ServiceBusMessage>
             {
-                await client.CloseAsync();
-            }
+                new ServiceBusMessage(content) { MessageId = messageId },
+                new ServiceBusMessage(content) { MessageId = messageId },
+                new ServiceBusMessage(content) { MessageId = messageId }
+            };
+
+            await sender.SendMessagesAsync(messages);
+
+            Console.WriteLine("Messages sent");
+
+            await using var receiver = serviceBusClient.CreateProcessor(destination, new ServiceBusProcessorOptions { AutoCompleteMessages = true, MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(10) });
+
+            receiver.ProcessMessageAsync += processMessagesEventArgs =>
+            {
+                var message = processMessagesEventArgs.Message;
+
+                return Console.Error.WriteLineAsync(
+                    $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+            };
+            receiver.ProcessErrorAsync += processErrorEventArgs =>
+                Console.Error.WriteLineAsync($"Exception: {processErrorEventArgs.Exception}");
+
+            await receiver.StartProcessingAsync();
+
+            await Task.Delay(TimeSpan.FromSeconds(25));
+
+            await sender.SendMessagesAsync(messages);
+            Console.WriteLine("Messages sent");
+
+            Console.ReadLine();
+
+            await receiver.CloseAsync();
         }
     }
 }

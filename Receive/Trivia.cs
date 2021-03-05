@@ -8,6 +8,7 @@ namespace Receive
 {
     public static class Trivia
     {
+        // TODO rework
         public static async Task Hu(MessageReceiver receiver)
         {
             Message message;

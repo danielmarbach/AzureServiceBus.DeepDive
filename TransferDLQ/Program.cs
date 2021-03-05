@@ -7,6 +7,8 @@ using Microsoft.Azure.ServiceBus.Core;
 
 namespace TransferDLQ
 {
+    using Azure.Messaging.ServiceBus;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -22,37 +24,55 @@ namespace TransferDLQ
         {
             await Prepare.Stage(connectionString, inputQueue, destinationQueue);
 
-            var client = new QueueClient(connectionString, inputQueue);
-            await client.SendAsync(new Message(Encoding.UTF8.GetBytes("Kick off")));
-            await client.CloseAsync();
-
-            var connection = new ServiceBusConnection(connectionString);
-            var receiver = new MessageReceiver(connection, inputQueue);
-            var sender = new MessageSender(connection, destinationQueue, inputQueue);
-            receiver.RegisterMessageHandler(
-                async (message, token) =>
+            await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
+            {
+                RetryOptions = new ServiceBusRetryOptions
                 {
-                    using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
-                    {
-                        Console.WriteLine(
-                            $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
-                        await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Will not leak")));
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
+            await using var kickOffSender = serviceBusClient.CreateSender(inputQueue);
+            await kickOffSender.SendMessageAsync(new ServiceBusMessage("Kick off"));
 
-                        await Prepare.Hazard(connectionString, destinationQueue);
+            await using var transactionalClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
+            {
+                EnableCrossEntityTransactions = true,
+                RetryOptions = new ServiceBusRetryOptions
+                {
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
 
-                        scope.Complete();
-                    }
 
-                    await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
-                }, Prepare.Options(connectionString, inputQueue)
-            );
+            var receiver = transactionalClient.CreateProcessor(inputQueue);
+            var sender = transactionalClient.CreateSender(destinationQueue);
+
+            receiver.ProcessMessageAsync += async processMessageEventArgs =>
+            {
+                var message = processMessageEventArgs.Message;
+
+                using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+                {
+                    Console.WriteLine(
+                        $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                    await sender.SendMessageAsync(new ServiceBusMessage("Will not leak"));
+
+                    await Prepare.Hazard(connectionString, destinationQueue);
+
+                    scope.Complete();
+                }
+
+                await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
+            };
+            receiver.ProcessErrorAsync += _ => Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+
+            await receiver.StartProcessingAsync();
+
             Console.ReadLine();
 
             await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
 
-            await receiver.CloseAsync();
-            await sender.CloseAsync();
-            await connection.CloseAsync();
+            await receiver.StopProcessingAsync();
         }
     }
 }
