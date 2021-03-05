@@ -20,7 +20,13 @@ namespace Receive
         {
             await using var stage = await Prepare.Stage(connectionString, destination);
 
-            await using var serviceBusClient = new ServiceBusClient(connectionString);
+            await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
+            {
+                RetryOptions = new ServiceBusRetryOptions
+                {
+                    TryTimeout = TimeSpan.FromSeconds(2)
+                }
+            });
 
             await using var sender = serviceBusClient.CreateSender(destination);
             await sender.SendMessageAsync(new ServiceBusMessage(Encoding.UTF8.GetBytes("Deep Dive")));
@@ -43,7 +49,7 @@ namespace Receive
                 syncEvent.TrySetResult(true);
             }
 
-            Task ErrorHandler(ProcessErrorEventArgs args) 
+            Task ErrorHandler(ProcessErrorEventArgs args)
             {
                 Console.WriteLine($"Exception: {args.Exception}");
                 Console.WriteLine($"FullyQualifiedNamespace: {args.FullyQualifiedNamespace}");
@@ -51,7 +57,7 @@ namespace Receive
                 Console.WriteLine($"EntityPath: {args.EntityPath}");
                 return Task.CompletedTask;
             }
-            
+
             receiver.ProcessMessageAsync += MessageHandler;
             receiver.ProcessErrorAsync += ErrorHandler;
 
