@@ -39,27 +39,22 @@ namespace Receive
             };
 
             await using var receiver = serviceBusClient.CreateProcessor(destination, processorOptions);
-
-            async Task MessageHandler(ProcessMessageEventArgs args)
+            receiver.ProcessMessageAsync += async messageEventArgs => 
             {
-                Console.WriteLine(
-                    $"Received message with '{args.Message.MessageId}' and content '{Encoding.UTF8.GetString(args.Message.Body)}'");
+                var message = messageEventArgs.Message;
+                await Console.Out.WriteLineAsync(
+                    $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
                 // throw new InvalidOperationException();
-                await args.CompleteMessageAsync(args.Message);
+                await messageEventArgs.CompleteMessageAsync(message);
                 syncEvent.TrySetResult(true);
-            }
-
-            Task ErrorHandler(ProcessErrorEventArgs args)
+            };
+            receiver.ProcessErrorAsync += async errorEventArgs =>
             {
-                Console.WriteLine($"Exception: {args.Exception}");
-                Console.WriteLine($"FullyQualifiedNamespace: {args.FullyQualifiedNamespace}");
-                Console.WriteLine($"ErrorSource: {args.ErrorSource}");
-                Console.WriteLine($"EntityPath: {args.EntityPath}");
-                return Task.CompletedTask;
-            }
-
-            receiver.ProcessMessageAsync += MessageHandler;
-            receiver.ProcessErrorAsync += ErrorHandler;
+                await Console.Out.WriteLineAsync($"Exception: {errorEventArgs.Exception}");
+                await Console.Out.WriteLineAsync($"FullyQualifiedNamespace: {errorEventArgs.FullyQualifiedNamespace}");
+                await Console.Out.WriteLineAsync($"ErrorSource: {errorEventArgs.ErrorSource}");
+                await Console.Out.WriteLineAsync($"EntityPath: {errorEventArgs.EntityPath}");
+            };
 
             await receiver.StartProcessingAsync();
 
