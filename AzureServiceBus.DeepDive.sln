@@ -1,39 +1,41 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio 15
-VisualStudioVersion = 15.0.26124.0
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.31025.194
 MinimumVisualStudioVersion = 15.0.26124.0
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AtomicSend", "AtomicSend\AtomicSend.csproj", "{0524C8BE-9B27-499C-B857-DB899D7BFC2E}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "AtomicSend", "AtomicSend\AtomicSend.csproj", "{0524C8BE-9B27-499C-B857-DB899D7BFC2E}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Batching", "Batching\Batching.csproj", "{E41E5473-B06C-46DA-BD57-F4B1F3C4A5B5}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Batching", "Batching\Batching.csproj", "{E41E5473-B06C-46DA-BD57-F4B1F3C4A5B5}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Connections", "Connections\Connections.csproj", "{5EDEF962-30B4-4F21-9129-19AADC3B6810}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Connections", "Connections\Connections.csproj", "{5EDEF962-30B4-4F21-9129-19AADC3B6810}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Deadlettering", "Deadlettering\Deadlettering.csproj", "{F8E7AC31-9408-4EB0-ADBF-2A513316C16B}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Deadlettering", "Deadlettering\Deadlettering.csproj", "{F8E7AC31-9408-4EB0-ADBF-2A513316C16B}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Dedup", "Dedup\Dedup.csproj", "{3FDC781D-CF14-477C-B5AB-C20E87506DE2}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Dedup", "Dedup\Dedup.csproj", "{3FDC781D-CF14-477C-B5AB-C20E87506DE2}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Expiry", "Expiry\Expiry.csproj", "{31C28910-5020-4D35-9761-350BF8AEFD1D}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Expiry", "Expiry\Expiry.csproj", "{31C28910-5020-4D35-9761-350BF8AEFD1D}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Forwarding", "Forwarding\Forwarding.csproj", "{23477BE2-D8AF-43F6-ACFC-9DDA2003B8FA}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Forwarding", "Forwarding\Forwarding.csproj", "{23477BE2-D8AF-43F6-ACFC-9DDA2003B8FA}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Plugin", "Plugin\Plugin.csproj", "{F5AF0200-F471-4423-A455-A2273B8001F9}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Plugin", "Plugin\Plugin.csproj", "{F5AF0200-F471-4423-A455-A2273B8001F9}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Pubsub", "Pubsub\Pubsub.csproj", "{AAAD12AB-7EF6-45AC-9536-4F350B273D01}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Pubsub", "Pubsub\Pubsub.csproj", "{AAAD12AB-7EF6-45AC-9536-4F350B273D01}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Receive", "Receive\Receive.csproj", "{F4CECB03-7DD7-4105-9829-975ADE568B7F}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Receive", "Receive\Receive.csproj", "{F4CECB03-7DD7-4105-9829-975ADE568B7F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Scheduling", "Scheduling\Scheduling.csproj", "{2802FE9E-6A12-4579-97A7-865AE4BC214D}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Scheduling", "Scheduling\Scheduling.csproj", "{2802FE9E-6A12-4579-97A7-865AE4BC214D}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Send", "Send\Send.csproj", "{60B6F77E-DAA5-493F-A57E-EB44D4A06311}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Send", "Send\Send.csproj", "{60B6F77E-DAA5-493F-A57E-EB44D4A06311}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SendVia", "SendVia\SendVia.csproj", "{1B59B07A-C51D-4878-942F-B021AC58A506}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SendVia", "SendVia\SendVia.csproj", "{1B59B07A-C51D-4878-942F-B021AC58A506}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Session", "Session\Session.csproj", "{6E3F8FCF-F421-4AC6-AEE9-5903F228CC10}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Session", "Session\Session.csproj", "{6E3F8FCF-F421-4AC6-AEE9-5903F228CC10}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Topologies", "Topologies\Topologies.csproj", "{572CE1F0-98AF-4D3B-A3FE-8A21A3B045F1}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Topologies", "Topologies\Topologies.csproj", "{572CE1F0-98AF-4D3B-A3FE-8A21A3B045F1}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TransferDLQ", "TransferDLQ\TransferDLQ.csproj", "{F022E8C2-7A04-4CBD-91B5-0DCC6DA10E5E}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "TransferDLQ", "TransferDLQ\TransferDLQ.csproj", "{F022E8C2-7A04-4CBD-91B5-0DCC6DA10E5E}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "RuntimeInfo", "RuntimeInfo\RuntimeInfo.csproj", "{4C3B0294-3930-4629-86AF-4D82E218C819}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -43,9 +45,6 @@ Global
 		Release|Any CPU = Release|Any CPU
 		Release|x64 = Release|x64
 		Release|x86 = Release|x86
-	EndGlobalSection
-	GlobalSection(SolutionProperties) = preSolution
-		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{0524C8BE-9B27-499C-B857-DB899D7BFC2E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
@@ -240,5 +239,23 @@ Global
 		{F022E8C2-7A04-4CBD-91B5-0DCC6DA10E5E}.Release|x64.Build.0 = Release|Any CPU
 		{F022E8C2-7A04-4CBD-91B5-0DCC6DA10E5E}.Release|x86.ActiveCfg = Release|Any CPU
 		{F022E8C2-7A04-4CBD-91B5-0DCC6DA10E5E}.Release|x86.Build.0 = Release|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Debug|x64.Build.0 = Debug|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Debug|x86.Build.0 = Debug|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Release|x64.ActiveCfg = Release|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Release|x64.Build.0 = Release|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Release|x86.ActiveCfg = Release|Any CPU
+		{4C3B0294-3930-4629-86AF-4D82E218C819}.Release|x86.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {7C1EA792-813E-4E10-A95D-6C0EA35D31A2}
 	EndGlobalSection
 EndGlobal

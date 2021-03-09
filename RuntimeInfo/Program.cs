@@ -1,9 +1,7 @@
-﻿using System;
-using System.Text;
-using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Core;
+using Azure.Messaging.ServiceBus;
 using Microsoft.Azure.ServiceBus.Management;
+using System;
+using System.Threading.Tasks;
 using static System.Console;
 
 namespace SendVia
@@ -24,13 +22,12 @@ namespace SendVia
         {
             await Prepare.Stage(connectionString, inputQueue, topicName, subscriptionName);
 
-            var sender = new MessageSender(connectionString, inputQueue);
-            await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Kick off")));
-            await sender.CloseAsync();
+            await using var serviceBusClient = new ServiceBusClient(connectionString);
+            await using var queueSender = serviceBusClient.CreateSender(inputQueue);
+            await queueSender.SendMessageAsync(new ServiceBusMessage("Kick off"));
 
-            sender = new MessageSender(connectionString, topicName);
-            await sender.SendAsync(new Message(Encoding.UTF8.GetBytes("Kick off")));
-            await sender.CloseAsync();
+            await using var topicSender = serviceBusClient.CreateSender(topicName);
+            await topicSender.SendMessageAsync(new ServiceBusMessage("Kick off"));
 
             var client = new ManagementClient(connectionString);
 
