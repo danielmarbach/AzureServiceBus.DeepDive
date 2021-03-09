@@ -16,14 +16,14 @@ namespace Send
             await Prepare.Stage(connectionString, destination);
 
             await using var serviceBusClient = new ServiceBusClient(connectionString);
-
             await using var client = serviceBusClient.CreateSender(destination);
+            
             var message = new ServiceBusMessage("Deep Dive");
 
             message.ApplicationProperties.Add("TenantId", "MyTenantId");
-            // explore a few more properties
 
             await client.SendMessageAsync(message);
+            Console.WriteLine("Sent message");
         }
     }
 }
