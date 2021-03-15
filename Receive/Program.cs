@@ -1,6 +1,7 @@
 using System;
-using System.Text;
 using System.Threading.Tasks;
+using static System.Console;
+using static System.Text.Encoding;
 
 namespace Receive
 {
@@ -29,31 +30,34 @@ namespace Receive
             });
 
             await using var sender = serviceBusClient.CreateSender(destination);
-            await sender.SendMessageAsync(new ServiceBusMessage(Encoding.UTF8.GetBytes("Deep Dive")));
-            Console.WriteLine("Message sent");
+            await sender.SendMessageAsync(new ServiceBusMessage(UTF8.GetBytes("Deep Dive")));
+            WriteLine("Message sent");
 
-            var processorOptions = new ServiceBusProcessorOptions {
-                    AutoCompleteMessages  = false,
-                    MaxConcurrentCalls = 1,
-                    MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(10)
+            var processorOptions = new ServiceBusProcessorOptions
+            {
+                AutoCompleteMessages = false,
+                MaxConcurrentCalls = 1,
+                MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(10),
+                ReceiveMode = ServiceBusReceiveMode.PeekLock,
+                PrefetchCount = 10
             };
 
             await using var receiver = serviceBusClient.CreateProcessor(destination, processorOptions);
-            receiver.ProcessMessageAsync += async messageEventArgs => 
+            receiver.ProcessMessageAsync += async messageEventArgs =>
             {
                 var message = messageEventArgs.Message;
-                await Console.Out.WriteLineAsync(
-                    $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                await Out.WriteLineAsync(
+                    $"Received message with '{message.MessageId}' and content '{UTF8.GetString(message.Body)}'");
                 // throw new InvalidOperationException();
                 await messageEventArgs.CompleteMessageAsync(message);
                 syncEvent.TrySetResult(true);
             };
             receiver.ProcessErrorAsync += async errorEventArgs =>
             {
-                await Console.Out.WriteLineAsync($"Exception: {errorEventArgs.Exception}");
-                await Console.Out.WriteLineAsync($"FullyQualifiedNamespace: {errorEventArgs.FullyQualifiedNamespace}");
-                await Console.Out.WriteLineAsync($"ErrorSource: {errorEventArgs.ErrorSource}");
-                await Console.Out.WriteLineAsync($"EntityPath: {errorEventArgs.EntityPath}");
+                await Out.WriteLineAsync($"Exception: {errorEventArgs.Exception}");
+                await Out.WriteLineAsync($"FullyQualifiedNamespace: {errorEventArgs.FullyQualifiedNamespace}");
+                await Out.WriteLineAsync($"ErrorSource: {errorEventArgs.ErrorSource}");
+                await Out.WriteLineAsync($"EntityPath: {errorEventArgs.EntityPath}");
             };
 
             await receiver.StartProcessingAsync();

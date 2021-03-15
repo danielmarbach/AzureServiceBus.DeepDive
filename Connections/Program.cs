@@ -1,6 +1,7 @@
+using Azure.Messaging.ServiceBus;
 using System;
 using System.Threading.Tasks;
-using Azure.Messaging.ServiceBus;
+using static System.Console;
 
 namespace Connections
 {
@@ -15,7 +16,7 @@ namespace Connections
         {
             await using var stage = await Prepare.Stage(connectionString, destination);
 
-            Console.WriteLine("netstat -na | find \"5671\"");
+            WriteLine("netstat -na | find \"5671\"");
 
             await using var serviceBusClient = new ServiceBusClient(connectionString);
             await using var connectionSharingSender = serviceBusClient.CreateSender(destination);
@@ -23,8 +24,8 @@ namespace Connections
             await using var connectionSharingReceiver = serviceBusClient.CreateReceiver(destination);
             await connectionSharingReceiver.ReceiveMessageAsync();
 
-            Console.WriteLine("Continue with a dedicated connection");
-            Console.ReadLine();
+            WriteLine("Continue with a dedicated connection");
+            ReadLine();
 
             await connectionSharingSender.CloseAsync();
             await connectionSharingSender.DisposeAsync();
@@ -43,8 +44,8 @@ namespace Connections
             await senderWithDedicatedConnection.SendMessageAsync(new ServiceBusMessage("Deep Dive"));
             await receiverWithDedicatedConnection.ReceiveMessageAsync();
 
-            Console.WriteLine("Enter to stop");
-            Console.ReadLine();
+            WriteLine("Enter to stop");
+            ReadLine();
         }
     }
 }
