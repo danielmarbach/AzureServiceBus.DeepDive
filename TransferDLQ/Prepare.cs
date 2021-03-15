@@ -48,10 +48,12 @@ namespace TransferDLQ
             var client = new ManagementClient(connectionString);
 
             var info = await client.GetQueueRuntimeInfoAsync(destination);
-            
-            long activeMessageCount = info.MessageCountDetails.ActiveMessageCount;
-            long deadLetterMessageCount = info.MessageCountDetails.DeadLetterMessageCount;
-            long transferDeadLetterMessageCount = info.MessageCountDetails.TransferDeadLetterMessageCount;
+
+            var details = info.MessageCountDetails;
+
+            long activeMessageCount = details.ActiveMessageCount;
+            long deadLetterMessageCount = details.DeadLetterMessageCount;
+            long transferDeadLetterMessageCount = details.TransferDeadLetterMessageCount;
 
             string destinationDeadLetterPath = EntityNameHelper.FormatDeadLetterPath(destination);
             string destinationTransferDeadLetterPath = EntityNameHelper.FormatTransferDeadLetterPath(destination);

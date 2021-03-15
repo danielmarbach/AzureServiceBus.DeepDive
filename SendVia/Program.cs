@@ -1,9 +1,8 @@
-﻿using System;
-using System.Text;
+using System;
 using System.Threading.Tasks;
 using System.Transactions;
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Core;
+using static System.Console;
+using static System.Text.Encoding;
 
 namespace SendVia
 {
@@ -44,8 +43,8 @@ namespace SendVia
             {
                 var message = processMessageEventArgs.Message;
 
-                await Console.Error.WriteLineAsync(
-                    $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                await Error.WriteLineAsync(
+                    $"Received message with '{message.MessageId}' and content '{UTF8.GetString(message.Body)}'");
                 await sender.SendMessageAsync(new ServiceBusMessage("Will leak"));
                 throw new InvalidOperationException();
             };
@@ -53,7 +52,7 @@ namespace SendVia
 
             await receiver.StartProcessingAsync();
 
-            Console.ReadLine();
+            ReadLine();
             await receiver.StopProcessingAsync();
             await receiver.CloseAsync();
             await sender.CloseAsync();
@@ -82,8 +81,8 @@ namespace SendVia
                 var message = processMessageEventArgs.Message;
                 using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
                 {
-                    Console.WriteLine(
-                        $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                    WriteLine(
+                        $"Received message with '{message.MessageId}' and content '{UTF8.GetString(message.Body)}'");
                     await sender.SendMessageAsync(new ServiceBusMessage("Will not leak"));
 
                     if (!message.ApplicationProperties.ContainsKey("Win")) throw new InvalidOperationException();
@@ -99,7 +98,7 @@ namespace SendVia
 
             await receiver.StartProcessingAsync();
 
-            Console.ReadLine();
+            ReadLine();
 
             await receiver.StopProcessingAsync();
             await receiver.CloseAsync();

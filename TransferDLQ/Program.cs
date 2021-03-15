@@ -1,9 +1,8 @@
-﻿using System;
-using System.Text;
+using System;
 using System.Threading.Tasks;
 using System.Transactions;
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Core;
+using static System.Console;
+using static System.Text.Encoding;
 
 namespace TransferDLQ
 {
@@ -53,8 +52,8 @@ namespace TransferDLQ
 
                 using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
                 {
-                    Console.WriteLine(
-                        $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
+                    WriteLine(
+                        $"Received message with '{message.MessageId}' and content '{UTF8.GetString(message.Body)}'");
                     await sender.SendMessageAsync(new ServiceBusMessage("Will not leak"));
 
                     await Prepare.Hazard(connectionString, destinationQueue);
@@ -68,7 +67,7 @@ namespace TransferDLQ
 
             await receiver.StartProcessingAsync();
 
-            Console.ReadLine();
+            ReadLine();
 
             await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
 

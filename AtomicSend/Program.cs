@@ -1,8 +1,7 @@
-﻿using System;
-using System.Text;
+using System;
 using System.Threading.Tasks;
 using System.Transactions;
-using Microsoft.Azure.ServiceBus;
+using static System.Console;
 
 namespace AtomicSend
 {
@@ -27,21 +26,21 @@ namespace AtomicSend
             {
                 var message = new ServiceBusMessage("Deep Dive 1");
                 await sender.SendMessageAsync(message);
-                Console.WriteLine(
+                WriteLine(
                     $"Sent message 1 in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'");
 
                 await Prepare.ReportNumberOfMessages(connectionString, destination);
 
                 message = new ServiceBusMessage("Deep Dive 2");
                 await sender.SendMessageAsync(message);
-                Console.WriteLine(
+                WriteLine(
                     $"Sent message 2 in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'");
 
-                Console.WriteLine("About to complete transaction scope.");
+                WriteLine("About to complete transaction scope.");
                 await Prepare.ReportNumberOfMessages(connectionString, destination);
 
                 scope.Complete();
-                Console.WriteLine("Completed transaction scope.");
+                WriteLine("Completed transaction scope.");
             }
 
             await Prepare.ReportNumberOfMessages(connectionString, destination);

@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
+using static System.Console;
 
 namespace Dedup
 {
@@ -44,7 +44,7 @@ namespace Dedup
 
             await sender.SendMessagesAsync(messages);
 
-            Console.WriteLine("Messages sent");
+            WriteLine("Messages sent");
 
             await using var receiver = serviceBusClient.CreateProcessor(destination, new ServiceBusProcessorOptions { AutoCompleteMessages = true, MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(10) });
 
@@ -52,20 +52,20 @@ namespace Dedup
             {
                 var message = processMessagesEventArgs.Message;
 
-                return Console.Error.WriteLineAsync(
+                return Error.WriteLineAsync(
                     $"Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
             };
             receiver.ProcessErrorAsync += processErrorEventArgs =>
-                Console.Error.WriteLineAsync($"Exception: {processErrorEventArgs.Exception}");
+                Error.WriteLineAsync($"Exception: {processErrorEventArgs.Exception}");
 
             await receiver.StartProcessingAsync();
 
             await Task.Delay(TimeSpan.FromSeconds(25));
 
             await sender.SendMessagesAsync(messages);
-            Console.WriteLine("Messages sent");
+            WriteLine("Messages sent");
 
-            Console.ReadLine();
+            ReadLine();
 
             await receiver.CloseAsync();
         }

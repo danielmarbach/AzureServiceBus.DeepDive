@@ -1,9 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Text;
 using System.Threading.Tasks;
 using System.Transactions;
-using Microsoft.Azure.ServiceBus;
+using static System.Console;
 
 namespace Batching
 {
@@ -31,10 +30,10 @@ namespace Batching
                 messages.Add(message);
             }
 
-            Console.WriteLine($"Sending {messages.Count} messages in a batch.");
+            WriteLine($"Sending {messages.Count} messages in a batch.");
             await sender.SendMessagesAsync(messages);
             messages.Clear();
-            Console.WriteLine();
+            WriteLine();
 
             for (var i = 0; i < 6500; i++)
             {
@@ -44,16 +43,16 @@ namespace Batching
 
             try
             {
-                Console.WriteLine($"Sending {messages.Count} messages in a batch.");
+                WriteLine($"Sending {messages.Count} messages in a batch.");
                 await sender.SendMessagesAsync(messages);
             }
-            catch (ServiceBusException ex) when(ex.Reason == ServiceBusFailureReason.MessageSizeExceeded)
+            catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessageSizeExceeded)
             {
-                await Console.Error.WriteLineAsync(ex.Message);
+                await Error.WriteLineAsync(ex.Message);
             }
 
             messages.Clear();
-            Console.WriteLine();
+            WriteLine();
 
             for (var i = 0; i < 101; i++)
             {
@@ -65,14 +64,14 @@ namespace Batching
             {
                 using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
                 {
-                    Console.WriteLine($"Sending {messages.Count} messages in a batch with in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'.");
+                    WriteLine($"Sending {messages.Count} messages in a batch with in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'.");
                     await sender.SendMessagesAsync(messages);
                     scope.Complete();
                 }
             }
-            catch (ServiceBusException ex) when(ex.Reason == ServiceBusFailureReason.QuotaExceeded)
+            catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.QuotaExceeded)
             {
-                await Console.Error.WriteLineAsync(ex.Message);
+                await Error.WriteLineAsync(ex.Message);
             }
 
             var messagesToSend = new Queue<ServiceBusMessage>();
@@ -102,7 +101,7 @@ namespace Batching
                     messagesToSend.Dequeue();
                 }
 
-                Console.WriteLine($"Sending {messageBatch.Count} messages in a batch {batchCount++}.");
+                WriteLine($"Sending {messageBatch.Count} messages in a batch {batchCount++}.");
                 await sender.SendMessagesAsync(messageBatch);
             }
         }
