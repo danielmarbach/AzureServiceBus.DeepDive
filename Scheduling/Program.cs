@@ -1,12 +1,10 @@
-﻿using System;
+using System;
 using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Core;
+using static System.Console;
 
 namespace Scheduling
 {
-    using System.Threading;
     using Azure.Messaging.ServiceBus;
 
     internal class Program
@@ -35,21 +33,21 @@ namespace Scheduling
 
             var due = DateTimeOffset.UtcNow.AddSeconds(10);
             await sender.ScheduleMessageAsync(new ServiceBusMessage($"Deep Dive + {due}"), due);
-            Console.WriteLine($"{DateTimeOffset.UtcNow}: Message scheduled first");
+            WriteLine($"{DateTimeOffset.UtcNow}: Message scheduled first");
 
             var sequenceId =
                 await sender.ScheduleMessageAsync(new ServiceBusMessage($"Deep Dive + {due}"), due);
-            Console.WriteLine($"{DateTimeOffset.UtcNow}: Message scheduled second");
+            WriteLine($"{DateTimeOffset.UtcNow}: Message scheduled second");
 
             await sender.CancelScheduledMessageAsync(sequenceId);
-            Console.WriteLine($"{DateTimeOffset.UtcNow}: Canceled second");
+            WriteLine($"{DateTimeOffset.UtcNow}: Canceled second");
 
             await using var receiver = serviceBusClient.CreateProcessor(destination, new ServiceBusProcessorOptions { ReceiveMode = ServiceBusReceiveMode.ReceiveAndDelete });
             receiver.ProcessMessageAsync += async processMessageEventArgs =>
             {
                 var message = processMessageEventArgs.Message;
 
-                await Console.Error.WriteLineAsync(
+                await Error.WriteLineAsync(
                     $"{DateTimeOffset.UtcNow}: Received message with '{message.MessageId}' and content '{Encoding.UTF8.GetString(message.Body)}'");
 
                 syncEvent.TrySetResult(true);

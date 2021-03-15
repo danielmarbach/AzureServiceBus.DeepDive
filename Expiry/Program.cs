@@ -1,7 +1,6 @@
-﻿using System;
-using System.Text;
+using System;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
+using static System.Console;
 
 namespace Expiry
 {
@@ -35,13 +34,13 @@ namespace Expiry
             };
 
             await sender.SendMessageAsync(message);
-            Console.WriteLine("Sent message");
+            WriteLine("Sent message");
 
             // Note that expired messages are only purged and moved to the DLQ when there is at least one
             // active receiver pulling from the main queue or subscription; that behavior is by design.
             await Prepare.SimulateActiveReceiver(serviceBusClient, destination);
 
-            Console.WriteLine("Message expired");
+            WriteLine("Message expired");
         }
     }
 }

@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
+using static System.Console;
+using static System.Text.Encoding;
 
 namespace Deadlettering
 {
@@ -29,41 +29,44 @@ namespace Deadlettering
 
             await using var sender = serviceBusClient.CreateSender(destination);
 
-            var message = new ServiceBusMessage("Half life") { TimeToLive = TimeSpan.FromSeconds(1) };
+            var message = new ServiceBusMessage("Half life")
+            {
+                TimeToLive = TimeSpan.FromSeconds(1)
+            };
             await sender.SendMessageAsync(message);
-            Console.WriteLine("Sent half life message");
+            WriteLine("Sent half life message");
 
             message = new ServiceBusMessage("Delivery Count");
             await sender.SendMessageAsync(message);
-            Console.WriteLine("Sent delivery count message");
+            WriteLine("Sent delivery count message");
 
             message = new ServiceBusMessage("Poor Soul");
             message.ApplicationProperties.Add("Yehaa", "Why so happy?");
             await sender.SendMessageAsync(message);
-            Console.WriteLine("Sent poor soul message");
+            WriteLine("Sent poor soul message");
 
             await Task.Delay(2000);
 
             await using var receiver = serviceBusClient.CreateProcessor(destination, new ServiceBusProcessorOptions
             {
-                AutoCompleteMessages =  false,
+                AutoCompleteMessages = false,
                 MaxConcurrentCalls = 3
             });
 
             receiver.ProcessMessageAsync += async processMessageEventArgs =>
             {
                 var message = processMessageEventArgs.Message;
-                switch (Encoding.UTF8.GetString(message.Body))
+                switch (UTF8.GetString(message.Body))
                 {
                     case "Half life":
                         await processMessageEventArgs.AbandonMessageAsync(message);
-                        await Console.Error.WriteLineAsync("Abandon half life message");
+                        await Error.WriteLineAsync("Abandon half life message");
                         break;
                     case "Delivery Count":
-                        await Console.Error.WriteLineAsync("Throwing delivery count message");
+                        await Error.WriteLineAsync("Throwing delivery count message");
                         throw new InvalidOperationException();
                     case "Poor Soul":
-                        await Console.Error.WriteLineAsync("Dead letter poor soul message");
+                        await Error.WriteLineAsync("Dead letter poor soul message");
                         await processMessageEventArgs.DeadLetterMessageAsync(message,
                             new Dictionary<string, object>
                             {
