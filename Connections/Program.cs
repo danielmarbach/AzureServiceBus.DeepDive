@@ -16,7 +16,7 @@ namespace Connections
         {
             await using var stage = await Prepare.Stage(connectionString, destination);
 
-            WriteLine("netstat -na | find \"5671\"");
+            WriteLine("netstat -na | find \"5671 \"");
 
             await using var serviceBusClient = new ServiceBusClient(connectionString);
             await using var connectionSharingSender = serviceBusClient.CreateSender(destination);
