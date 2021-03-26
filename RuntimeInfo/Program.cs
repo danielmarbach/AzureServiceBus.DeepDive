@@ -1,11 +1,12 @@
 using Azure.Messaging.ServiceBus;
-using Microsoft.Azure.ServiceBus.Management;
 using System;
 using System.Threading.Tasks;
 using static System.Console;
 
-namespace SendVia
+namespace RuntimeInfo
 {
+    using Azure.Messaging.ServiceBus.Administration;
+
     internal class Program
     {
         private static readonly string connectionString =
@@ -29,9 +30,9 @@ namespace SendVia
             await using var topicSender = serviceBusClient.CreateSender(topicName);
             await topicSender.SendMessageAsync(new ServiceBusMessage("Kick off"));
 
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
 
-            var namespaceInfo = await client.GetNamespaceInfoAsync();
+            NamespaceProperties namespaceInfo = await client.GetNamespacePropertiesAsync();
             WriteLine($"Namespace Information about '{namespaceInfo.Name}'");
             WriteLine($"{nameof(namespaceInfo.Alias)}: {namespaceInfo.Alias}");
             WriteLine($"{nameof(namespaceInfo.CreatedTime)}: {namespaceInfo.CreatedTime}");
@@ -39,55 +40,51 @@ namespace SendVia
             WriteLine($"{nameof(namespaceInfo.MessagingUnits)}: {namespaceInfo.MessagingUnits}");
             WriteLine($"{nameof(namespaceInfo.ModifiedTime)}: {namespaceInfo.ModifiedTime}");
             WriteLine($"{nameof(namespaceInfo.Name)}: {namespaceInfo.Name}");
-            WriteLine($"{nameof(namespaceInfo.NamespaceType)}: {namespaceInfo.NamespaceType}");
+            WriteLine($"{nameof(namespaceInfo.MessagingUnits)}: {namespaceInfo.MessagingUnits}");
             WriteLine();
 
-            var inputQueueInfo = await client.GetQueueRuntimeInfoAsync(inputQueue);
+            QueueRuntimeProperties inputQueueInfo = await client.GetQueueRuntimePropertiesAsync(inputQueue);
             WriteLine($"Queue Information about '{inputQueue}'");
             WriteLine($"{nameof(inputQueueInfo.AccessedAt)}: {inputQueueInfo.AccessedAt}");
             WriteLine($"{nameof(inputQueueInfo.CreatedAt)}: {inputQueueInfo.CreatedAt}");
-            WriteLine($"{nameof(inputQueueInfo.MessageCount)}: {inputQueueInfo.MessageCount}");
-            WriteLine($"{nameof(inputQueueInfo.MessageCountDetails)}.{nameof(inputQueueInfo.MessageCountDetails.ActiveMessageCount)}: {inputQueueInfo.MessageCountDetails.ActiveMessageCount}");
-            WriteLine($"{nameof(inputQueueInfo.MessageCountDetails)}.{nameof(inputQueueInfo.MessageCountDetails.DeadLetterMessageCount)}: {inputQueueInfo.MessageCountDetails.DeadLetterMessageCount}");
-            WriteLine($"{nameof(inputQueueInfo.MessageCountDetails)}.{nameof(inputQueueInfo.MessageCountDetails.ScheduledMessageCount)}: {inputQueueInfo.MessageCountDetails.ScheduledMessageCount}");
-            WriteLine($"{nameof(inputQueueInfo.MessageCountDetails)}.{nameof(inputQueueInfo.MessageCountDetails.TransferDeadLetterMessageCount)}: {inputQueueInfo.MessageCountDetails.TransferDeadLetterMessageCount}");
-            WriteLine($"{nameof(inputQueueInfo.MessageCountDetails)}.{nameof(inputQueueInfo.MessageCountDetails.TransferMessageCount)}: {inputQueueInfo.MessageCountDetails.TransferMessageCount}");
-            WriteLine($"{nameof(inputQueueInfo.Path)}: {inputQueueInfo.Path}");
+            WriteLine($"{nameof(inputQueueInfo.TotalMessageCount)}: {inputQueueInfo.TotalMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.ActiveMessageCount)}: {inputQueueInfo.ActiveMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.DeadLetterMessageCount)}: {inputQueueInfo.DeadLetterMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.ScheduledMessageCount)}: {inputQueueInfo.ScheduledMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.TransferDeadLetterMessageCount)}: {inputQueueInfo.TransferDeadLetterMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.TransferMessageCount)}: {inputQueueInfo.TransferMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.Name)}: {inputQueueInfo.Name}");
             WriteLine($"{nameof(inputQueueInfo.SizeInBytes)}: {inputQueueInfo.SizeInBytes}");
             WriteLine($"{nameof(inputQueueInfo.UpdatedAt)}: {inputQueueInfo.UpdatedAt}");
             WriteLine();
 
-            var topicInfo = await client.GetTopicRuntimeInfoAsync(topicName);
+            TopicRuntimeProperties topicInfo = await client.GetTopicRuntimePropertiesAsync(topicName);
             WriteLine($"TopicInformation Information about '{topicName}'");
             WriteLine($"{nameof(topicInfo.AccessedAt)}: {topicInfo.AccessedAt}");
             WriteLine($"{nameof(topicInfo.CreatedAt)}: {topicInfo.CreatedAt}");
-            WriteLine($"{nameof(topicInfo.MessageCountDetails)}.{nameof(topicInfo.MessageCountDetails.ActiveMessageCount)}: {topicInfo.MessageCountDetails.ActiveMessageCount}");
-            WriteLine($"{nameof(topicInfo.MessageCountDetails)}.{nameof(topicInfo.MessageCountDetails.DeadLetterMessageCount)}: {topicInfo.MessageCountDetails.DeadLetterMessageCount}");
-            WriteLine($"{nameof(topicInfo.MessageCountDetails)}.{nameof(topicInfo.MessageCountDetails.ScheduledMessageCount)}: {topicInfo.MessageCountDetails.ScheduledMessageCount}");
-            WriteLine($"{nameof(topicInfo.MessageCountDetails)}.{nameof(topicInfo.MessageCountDetails.TransferDeadLetterMessageCount)}: {topicInfo.MessageCountDetails.TransferDeadLetterMessageCount}");
-            WriteLine($"{nameof(topicInfo.MessageCountDetails)}.{nameof(topicInfo.MessageCountDetails.TransferMessageCount)}: {topicInfo.MessageCountDetails.TransferMessageCount}");
-            WriteLine($"{nameof(topicInfo.Path)}: {topicInfo.Path}");
+            WriteLine($"{nameof(topicInfo.ScheduledMessageCount)}: {topicInfo.ScheduledMessageCount}");
+            WriteLine($"{nameof(topicInfo.SubscriptionCount)}: {topicInfo.SubscriptionCount}");
+            WriteLine($"{nameof(topicInfo.Name)}: {topicInfo.Name}");
             WriteLine($"{nameof(topicInfo.SizeInBytes)}: {topicInfo.SizeInBytes}");
             WriteLine($"{nameof(topicInfo.SubscriptionCount)}: {topicInfo.SubscriptionCount}");
             WriteLine($"{nameof(topicInfo.UpdatedAt)}: {topicInfo.UpdatedAt}");
             WriteLine();
 
-            var subscriptionInfo = await client.GetSubscriptionRuntimeInfoAsync(topicName, subscriptionName);
+            SubscriptionRuntimeProperties subscriptionInfo = await client.GetSubscriptionRuntimePropertiesAsync(topicName, subscriptionName);
             WriteLine($"Subscription Information about '{subscriptionName}'");
             WriteLine($"{nameof(subscriptionInfo.AccessedAt)}: {subscriptionInfo.AccessedAt}");
             WriteLine($"{nameof(subscriptionInfo.CreatedAt)}: {subscriptionInfo.CreatedAt}");
-            WriteLine($"{nameof(subscriptionInfo.MessageCount)}: {subscriptionInfo.MessageCount}");
-            WriteLine($"{nameof(subscriptionInfo.MessageCountDetails)}.{nameof(subscriptionInfo.MessageCountDetails.ActiveMessageCount)}: {subscriptionInfo.MessageCountDetails.ActiveMessageCount}");
-            WriteLine($"{nameof(subscriptionInfo.MessageCountDetails)}.{nameof(subscriptionInfo.MessageCountDetails.DeadLetterMessageCount)}: {subscriptionInfo.MessageCountDetails.DeadLetterMessageCount}");
-            WriteLine($"{nameof(subscriptionInfo.MessageCountDetails)}.{nameof(subscriptionInfo.MessageCountDetails.ScheduledMessageCount)}: {subscriptionInfo.MessageCountDetails.ScheduledMessageCount}");
-            WriteLine($"{nameof(subscriptionInfo.MessageCountDetails)}.{nameof(subscriptionInfo.MessageCountDetails.TransferDeadLetterMessageCount)}: {subscriptionInfo.MessageCountDetails.TransferDeadLetterMessageCount}");
-            WriteLine($"{nameof(subscriptionInfo.MessageCountDetails)}.{nameof(subscriptionInfo.MessageCountDetails.TransferMessageCount)}: {subscriptionInfo.MessageCountDetails.TransferMessageCount}");
+            WriteLine($"{nameof(subscriptionInfo.TotalMessageCount)}: {subscriptionInfo.TotalMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.TotalMessageCount)}: {inputQueueInfo.TotalMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.ActiveMessageCount)}: {inputQueueInfo.ActiveMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.DeadLetterMessageCount)}: {inputQueueInfo.DeadLetterMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.ScheduledMessageCount)}: {inputQueueInfo.ScheduledMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.TransferDeadLetterMessageCount)}: {inputQueueInfo.TransferDeadLetterMessageCount}");
+            WriteLine($"{nameof(inputQueueInfo.TransferMessageCount)}: {inputQueueInfo.TransferMessageCount}");
             WriteLine($"{nameof(subscriptionInfo.SubscriptionName)}: {subscriptionInfo.SubscriptionName}");
-            WriteLine($"{nameof(subscriptionInfo.TopicPath)}: {subscriptionInfo.TopicPath}");
+            WriteLine($"{nameof(subscriptionInfo.TopicName)}: {subscriptionInfo.TopicName}");
             WriteLine($"{nameof(subscriptionInfo.UpdatedAt)}: {subscriptionInfo.UpdatedAt}");
             WriteLine();
-
-            await client.CloseAsync();
 
             ReadLine();
         }

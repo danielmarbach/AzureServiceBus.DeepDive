@@ -1,5 +1,5 @@
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus.Management;
+using Azure.Messaging.ServiceBus.Administration;
 
 namespace Session
 {
@@ -7,16 +7,14 @@ namespace Session
     {
         public static async Task Stage(string connectionString, string destination)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
             if (await client.QueueExistsAsync(destination)) await client.DeleteQueueAsync(destination);
 
-            var queueDescription = new QueueDescription(destination)
+            var queueDescription = new CreateQueueOptions(destination)
             {
                 RequiresSession = true
             };
             await client.CreateQueueAsync(queueDescription);
-            
-            await client.CloseAsync();
         }
     }
 }

@@ -1,5 +1,5 @@
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus.Management;
+using Azure.Messaging.ServiceBus.Administration;
 
 namespace Send
 {
@@ -7,9 +7,8 @@ namespace Send
     {
         public static async Task Stage(string connectionString, string destination)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
             await client.DeleteQueueAsync(destination);
-            await client.CloseAsync();
         }
     }
 }

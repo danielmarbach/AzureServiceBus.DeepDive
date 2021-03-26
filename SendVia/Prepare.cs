@@ -1,6 +1,6 @@
 using System;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus.Management;
+using Azure.Messaging.ServiceBus.Administration;
 
 namespace SendVia
 {
@@ -8,25 +8,21 @@ namespace SendVia
     {
         public static async Task Stage(string connectionString, string inputQueue, string destinationQueue)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
             if (await client.QueueExistsAsync(inputQueue)) await client.DeleteQueueAsync(inputQueue);
-            await client.CreateQueueAsync(new QueueDescription(inputQueue) { MaxDeliveryCount = 2 });
+            await client.CreateQueueAsync(new CreateQueueOptions(inputQueue) { MaxDeliveryCount = 2 });
 
             if (await client.QueueExistsAsync(destinationQueue)) await client.DeleteQueueAsync(destinationQueue);
             await client.CreateQueueAsync(destinationQueue);
-
-            await client.CloseAsync();
         }
 
         public static async Task ReportNumberOfMessages(string connectionString, string destination)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
 
-            var info = await client.GetQueueRuntimeInfoAsync(destination);
+            QueueRuntimeProperties info = await client.GetQueueRuntimePropertiesAsync(destination);
 
-            await client.CloseAsync();
-
-            Console.WriteLine($"#'{info.MessageCount}' messages in '{destination}'");
+            Console.WriteLine($"#'{info.ActiveMessageCount}' messages in '{destination}'");
         }
     }
 }

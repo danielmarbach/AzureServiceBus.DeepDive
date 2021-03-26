@@ -1,65 +1,47 @@
 using System;
 using System.Threading.Tasks;
 using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Management;
 
 namespace TransferDLQ
 {
+    using Azure.Messaging.ServiceBus.Administration;
+
     public static class Prepare
     {
-        public static MessageHandlerOptions Options(string connectionString, string inputQueue) =>
-        new MessageHandlerOptions(
-                    async exception => { await Prepare.ReportNumberOfMessages(connectionString, inputQueue); })
-        {
-            AutoComplete = true,
-            MaxConcurrentCalls = 1,
-            MaxAutoRenewDuration = TimeSpan.FromMinutes(10)
-        };
-
         public static async Task Stage(string connectionString, string inputQueue, string destinationQueue)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
             if (await client.QueueExistsAsync(inputQueue)) await client.DeleteQueueAsync(inputQueue);
-            await client.CreateQueueAsync(new QueueDescription(inputQueue) { MaxDeliveryCount = 1 });
+            await client.CreateQueueAsync(new CreateQueueOptions(inputQueue) { MaxDeliveryCount = 1 });
 
             if (await client.QueueExistsAsync(destinationQueue)) await client.DeleteQueueAsync(destinationQueue);
             await client.CreateQueueAsync(destinationQueue);
-
-            await client.CloseAsync();
         }
 
         public static async Task Hazard(string connectionString, string destinationQueue)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
             if (await client.QueueExistsAsync(destinationQueue))
             {
-                var description = new QueueDescription(destinationQueue)
-                {
-                    Status = EntityStatus.SendDisabled
-                };
-                await client.UpdateQueueAsync(description);
-            }
+                QueueProperties queueProperties = await client.GetQueueAsync(destinationQueue);
+                queueProperties.Status = EntityStatus.SendDisabled;
 
-            await client.CloseAsync();
+                await client.UpdateQueueAsync(queueProperties);
+            }
         }
 
         public static async Task ReportNumberOfMessages(string connectionString, string destination)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
 
-            var info = await client.GetQueueRuntimeInfoAsync(destination);
+            QueueRuntimeProperties info = await client.GetQueueRuntimePropertiesAsync(destination);
 
-            var details = info.MessageCountDetails;
-
-            long activeMessageCount = details.ActiveMessageCount;
-            long deadLetterMessageCount = details.DeadLetterMessageCount;
-            long transferDeadLetterMessageCount = details.TransferDeadLetterMessageCount;
+            long activeMessageCount = info.ActiveMessageCount;
+            long deadLetterMessageCount = info.DeadLetterMessageCount;
+            long transferDeadLetterMessageCount = info.TransferDeadLetterMessageCount;
 
             string destinationDeadLetterPath = EntityNameHelper.FormatDeadLetterPath(destination);
             string destinationTransferDeadLetterPath = EntityNameHelper.FormatTransferDeadLetterPath(destination);
-
-            await client.CloseAsync();
-
 
             Console.WriteLine($"#'{activeMessageCount}' messages in '{destination}'");
             Console.WriteLine(

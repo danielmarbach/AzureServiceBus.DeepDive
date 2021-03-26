@@ -1,5 +1,5 @@
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus.Management;
+using Azure.Messaging.ServiceBus.Administration;
 
 namespace Forwarding
 {
@@ -7,7 +7,7 @@ namespace Forwarding
     {
         public static async Task Stage(string connectionString)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
 
             async Task DeleteIfExists(string queueName)
             {
@@ -23,37 +23,35 @@ namespace Forwarding
                 DeleteIfExists("Hop")
             );
 
-            var description = new QueueDescription("Hop");
+            var description = new CreateQueueOptions("Hop");
             await client.CreateQueueAsync(description);
 
-            description = new QueueDescription("Hop0");
+            description = new CreateQueueOptions("Hop0");
             await client.CreateQueueAsync(description);
 
-            description = new QueueDescription("Hop1")
+            description = new CreateQueueOptions("Hop1")
             {
                 ForwardTo = "Hop0"
             };
             await client.CreateQueueAsync(description);
 
-            description = new QueueDescription("Hop2")
+            description = new CreateQueueOptions("Hop2")
             {
                 ForwardTo = "Hop1"
             };
             await client.CreateQueueAsync(description);
 
-            description = new QueueDescription("Hop3")
+            description = new CreateQueueOptions("Hop3")
             {
                 ForwardTo = "Hop2"
             };
             await client.CreateQueueAsync(description);
 
-            description = new QueueDescription("Hop4")
+            description = new CreateQueueOptions("Hop4")
             {
                 ForwardTo = "Hop3"
             };
             await client.CreateQueueAsync(description);
-
-            await client.CloseAsync();
         }
     }
 }

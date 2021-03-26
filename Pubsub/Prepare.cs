@@ -1,6 +1,5 @@
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Management;
+using Azure.Messaging.ServiceBus.Administration;
 
 namespace Pubsub
 {
@@ -11,41 +10,39 @@ namespace Pubsub
         {
             var client = await Cleanup(connectionString, topicName, rushSubscription, currencySubscription);
 
-            var subscriptionDescription = new SubscriptionDescription(topicName, rushSubscription);
-            await client.CreateSubscriptionAsync(subscriptionDescription);
-            
-            subscriptionDescription = new SubscriptionDescription(topicName, currencySubscription);
+            var subscriptionDescription = new CreateSubscriptionOptions(topicName, rushSubscription);
             await client.CreateSubscriptionAsync(subscriptionDescription);
 
-            await client.DeleteRuleAsync(topicName, rushSubscription, RuleDescription.DefaultRuleName);
-            await client.DeleteRuleAsync(topicName, currencySubscription, RuleDescription.DefaultRuleName);
+            subscriptionDescription = new CreateSubscriptionOptions(topicName, currencySubscription);
+            await client.CreateSubscriptionAsync(subscriptionDescription);
 
-            var ruleDescription = new RuleDescription
+            await client.DeleteRuleAsync(topicName, rushSubscription, "$Default");
+            await client.DeleteRuleAsync(topicName, currencySubscription, "$Default");
+
+            var ruleDescription = new CreateRuleOptions
             {
                 Name = "MessagesWithRushlabel",
-                Filter = new CorrelationFilter
+                Filter = new CorrelationRuleFilter
                 {
-                    Label = "rush"
+                    Subject = "rush"
                 },
                 Action = null
             };
             await client.CreateRuleAsync(topicName, rushSubscription, ruleDescription);
 
-            ruleDescription = new RuleDescription
+            ruleDescription = new CreateRuleOptions
             {
                 Name = "MessagesWithCurrencyCHF",
-                Filter = new SqlFilter("currency = 'CHF'"),
+                Filter = new SqlRuleFilter("currency = 'CHF'"),
                 Action = new SqlRuleAction("SET currency = 'Złoty'")
             };
             await client.CreateRuleAsync(topicName, currencySubscription, ruleDescription);
-
-            await client.CloseAsync();
         }
 
-        private static async Task<ManagementClient> Cleanup(string connectionString, string topicName,
+        private static async Task<ServiceBusAdministrationClient> Cleanup(string connectionString, string topicName,
             string rushSubscription, string currencySubscription)
         {
-            var client = new ManagementClient(connectionString);
+            var client = new ServiceBusAdministrationClient(connectionString);
 
             if (await client.SubscriptionExistsAsync(topicName, rushSubscription))
                 await client.DeleteSubscriptionAsync(topicName, rushSubscription);
@@ -55,7 +52,7 @@ namespace Pubsub
 
             if (await client.TopicExistsAsync(topicName)) await client.DeleteTopicAsync(topicName);
 
-            var topicDescription = new TopicDescription(topicName);
+            var topicDescription = new CreateTopicOptions(topicName);
             await client.CreateTopicAsync(topicDescription);
 
             return client;
