@@ -9,7 +9,11 @@ namespace Receive
         public static async Task<IAsyncDisposable> Stage(string connectionString, string destination)
         {
             var client = new ServiceBusAdministrationClient(connectionString);
-            if (!await client.QueueExistsAsync(destination)) await client.CreateQueueAsync(destination);
+            if (await client.QueueExistsAsync(destination))
+            {
+                await client.DeleteQueueAsync(destination);
+            }
+            await client.CreateQueueAsync(destination);
             return new Leave(connectionString, destination);
         }
 
