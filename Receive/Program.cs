@@ -39,7 +39,8 @@ namespace Receive
                 MaxConcurrentCalls = 1,
                 MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(10),
                 ReceiveMode = ServiceBusReceiveMode.PeekLock,
-                PrefetchCount = 10
+                PrefetchCount = 10,
+                Identifier = "MainPump"
             };
 
             await using var receiver = serviceBusClient.CreateProcessor(destination, processorOptions);
