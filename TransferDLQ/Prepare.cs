@@ -1,6 +1,5 @@
 using System;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
 
 namespace TransferDLQ
 {
@@ -39,9 +38,9 @@ namespace TransferDLQ
             long activeMessageCount = info.ActiveMessageCount;
             long deadLetterMessageCount = info.DeadLetterMessageCount;
             long transferDeadLetterMessageCount = info.TransferDeadLetterMessageCount;
-
-            string destinationDeadLetterPath = EntityNameHelper.FormatDeadLetterPath(destination);
-            string destinationTransferDeadLetterPath = EntityNameHelper.FormatTransferDeadLetterPath(destination);
+            
+            string destinationDeadLetterPath = $"{destination}/$DeadLetterQueue";
+            string destinationTransferDeadLetterPath = $"{destination}/$TransferDeadLetterQueue";
 
             Console.WriteLine($"#'{activeMessageCount}' messages in '{destination}'");
             Console.WriteLine(

@@ -6,8 +6,6 @@
 
   <ItemGroup>
     <PackageReference Include="Azure.Messaging.ServiceBus" />
-    <PackageReference Include="Microsoft.Azure.ServiceBus" />
-    <PackageReference Include="Microsoft.Azure.Management.ServiceBus" />
   </ItemGroup>
 
 </Project>

@@ -1,8 +1,5 @@
 ﻿using System;
-using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.ServiceBus.Core;
 
 namespace Pubsub
 {
