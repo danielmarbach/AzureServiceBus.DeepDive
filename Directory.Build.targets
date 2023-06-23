@@ -1,7 +1,7 @@
 <Project>
 
   <ItemGroup>
-    <PackageReference Update="Azure.Messaging.ServiceBus" Version="7.10.0" />
+    <PackageReference Update="Azure.Messaging.ServiceBus" Version="7.11.1" />
   </ItemGroup>
 
 </Project>

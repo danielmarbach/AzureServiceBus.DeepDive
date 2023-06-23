@@ -23,6 +23,7 @@ namespace SendVia
             QueueRuntimeProperties info = await client.GetQueueRuntimePropertiesAsync(destination);
 
             Console.WriteLine($"#'{info.ActiveMessageCount}' messages in '{destination}'");
+            Console.WriteLine($"#'{info.TransferMessageCount}' transfer messages in '{destination}'");
         }
     }
 }

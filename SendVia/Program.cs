@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Transactions;
 using static System.Console;
@@ -32,73 +33,80 @@ namespace SendVia
             });
             await using var kickOffSender = serviceBusClient.CreateSender(inputQueue);
 
-            await kickOffSender.SendMessageAsync(new ServiceBusMessage("Kick off"));
-
-            var receiver = serviceBusClient.CreateProcessor(inputQueue);
-            var sender = serviceBusClient.CreateSender(destinationQueue);
-
-            await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
-
-            receiver.ProcessMessageAsync += async processMessageEventArgs =>
-            {
-                var message = processMessageEventArgs.Message;
-
-                await Error.WriteLineAsync(
-                    $"Received message with '{message.MessageId}' and content '{UTF8.GetString(message.Body)}'");
-                await sender.SendMessageAsync(new ServiceBusMessage("Will leak"));
-                throw new InvalidOperationException();
-            };
-            receiver.ProcessErrorAsync += _ => Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
-
-            await receiver.StartProcessingAsync();
-
-            ReadLine();
-            await receiver.StopProcessingAsync();
-            await receiver.CloseAsync();
-            await sender.CloseAsync();
-
-            await Prepare.Stage(connectionString, inputQueue, destinationQueue);
-
-            await kickOffSender.SendMessageAsync(new ServiceBusMessage("Fail"));
             var winMessage = new ServiceBusMessage("Win");
-            winMessage.ApplicationProperties.Add("Win", true);
             await kickOffSender.SendMessageAsync(winMessage);
             await kickOffSender.CloseAsync();
 
             await using var transactionalClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
             {
                 EnableCrossEntityTransactions = true,
-                RetryOptions = new ServiceBusRetryOptions
-                {
-                    TryTimeout = TimeSpan.FromSeconds(2)
-                }
+                // RetryOptions = new ServiceBusRetryOptions
+                // {
+                //     TryTimeout = TimeSpan.FromSeconds(2)
+                // }
             });
-            receiver = transactionalClient.CreateProcessor(inputQueue);
-            sender = transactionalClient.CreateSender(destinationQueue);
+            var receiver = transactionalClient.CreateProcessor(inputQueue);
+            var sender = transactionalClient.CreateSender(destinationQueue);
+            var sender2 = transactionalClient.CreateSender(destinationQueue);
 
             receiver.ProcessMessageAsync += async processMessageEventArgs =>
             {
                 var message = processMessageEventArgs.Message;
-                using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
-                {
-                    WriteLine(
-                        $"Received message with '{message.MessageId}' and content '{UTF8.GetString(message.Body)}'");
-                    await sender.SendMessageAsync(new ServiceBusMessage("Will not leak"));
-
-                    if (!message.ApplicationProperties.ContainsKey("Win")) throw new InvalidOperationException();
-
-                    await sender.SendMessageAsync(new ServiceBusMessage("Will not leak"));
-
-                    scope.Complete();
-                }
 
                 await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+
+                try
+                {
+                    var transaction = new CommittableTransaction(new TransactionOptions()
+                        { IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout });
+                    int numberOfMessages = 250;
+                    var tasks = new List<Task>(numberOfMessages);
+
+                    for (int i = 0; i < numberOfMessages; i++)
+                    {
+                        void WrongUsage()
+                        {
+                            using var scope = new TransactionScope(transaction, TransactionScopeAsyncFlowOption.Enabled);
+                            tasks.Add(sender.SendMessageAsync(new ServiceBusMessage(i.ToString())));
+                            scope.Complete();
+                        }
+
+                        async Task CorrectUsage()
+                        {
+                            using var scope = new TransactionScope(transaction, TransactionScopeAsyncFlowOption.Enabled);
+                            await sender.SendMessageAsync(new ServiceBusMessage(i.ToString()));
+                            scope.Complete();
+                        }
+
+                        //WrongUsage();
+                        tasks.Add(CorrectUsage());
+                    }
+
+                    await Task.WhenAll(tasks);
+
+                    transaction.Commit();
+                }
+                catch (Exception e)
+                {
+                    WriteLine(e.Message);
+                    throw;
+                }
+                finally
+                {
+                    await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+                }
             };
-            receiver.ProcessErrorAsync += _ => Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+            receiver.ProcessErrorAsync += async e =>
+            {
+                WriteLine(e.Exception.Message);
+                await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+            };
 
             await receiver.StartProcessingAsync();
 
             ReadLine();
+
+            await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
 
             await receiver.StopProcessingAsync();
             await receiver.CloseAsync();
