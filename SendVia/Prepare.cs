@@ -6,7 +6,7 @@ namespace SendVia
 {
     public static class Prepare
     {
-        public static async Task Stage(string connectionString, string inputQueue, string destinationQueue)
+        public static async Task Stage(string connectionString, string inputQueue, string destinationQueue, string errorQueue)
         {
             var client = new ServiceBusAdministrationClient(connectionString);
             if (await client.QueueExistsAsync(inputQueue)) await client.DeleteQueueAsync(inputQueue);
@@ -14,6 +14,9 @@ namespace SendVia
 
             if (await client.QueueExistsAsync(destinationQueue)) await client.DeleteQueueAsync(destinationQueue);
             await client.CreateQueueAsync(destinationQueue);
+
+            if (await client.QueueExistsAsync(errorQueue)) await client.DeleteQueueAsync(errorQueue);
+            await client.CreateQueueAsync(errorQueue);
         }
 
         public static async Task ReportNumberOfMessages(string connectionString, string destination)

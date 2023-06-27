@@ -14,16 +14,16 @@ namespace SendVia
         private static readonly string connectionString =
             Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString");
 
-        private static readonly string inputQueue = "queue";
-        private static readonly string destinationQueue = "destination";
-        private static readonly string errorQueue = "error";
+        private static readonly string inputQueue = "repro-queue";
+        private static readonly string destinationQueue = "repro-destination";
+        private static readonly string errorQueue = "repro-error";
 
         private static TaskCompletionSource<bool> syncEvent =
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private static async Task Main(string[] args)
         {
-            await Prepare.Stage(connectionString, inputQueue, destinationQueue);
+            await Prepare.Stage(connectionString, inputQueue, destinationQueue, errorQueue);
 
             await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
             {
@@ -61,7 +61,7 @@ namespace SendVia
                 {
                     using var transaction = new CommittableTransaction(new TransactionOptions()
                         { IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout });
-                    int numberOfMessages = 350;
+                    int numberOfMessages = 250;
                     var tasks = new List<Task>(numberOfMessages);
 
                     for (int i = 0; i < numberOfMessages; i++)
