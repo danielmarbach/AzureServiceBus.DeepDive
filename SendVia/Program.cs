@@ -55,6 +55,7 @@ namespace SendVia
                 var message = processMessageEventArgs.Message;
 
                 await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+                await Prepare.ReportNumberOfMessages(connectionString, errorQueue);
 
                 try
                 {
@@ -94,12 +95,12 @@ namespace SendVia
                         { IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout });
                     using var scope = new TransactionScope(transaction, TransactionScopeAsyncFlowOption.Enabled);
 
-                    await errorQueueSender.SendMessageAsync(new ServiceBusMessage(processMessageEventArgs.Message));
+                    await errorQueueSender.SendMessageAsync(new ServiceBusMessage(message));
 
                     scope.Complete();
                     transaction.Commit();
 
-                    await processMessageEventArgs.CompleteMessageAsync(processMessageEventArgs.Message);
+                    await processMessageEventArgs.CompleteMessageAsync(message);
                 }
                 finally
                 {
