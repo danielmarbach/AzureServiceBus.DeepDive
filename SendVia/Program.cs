@@ -16,6 +16,7 @@ namespace SendVia
 
         private static readonly string inputQueue = "queue";
         private static readonly string destinationQueue = "destination";
+        private static readonly string errorQueue = "error";
 
         private static TaskCompletionSource<bool> syncEvent =
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -47,7 +48,7 @@ namespace SendVia
             });
             var receiver = transactionalClient.CreateProcessor(inputQueue);
             var sender = transactionalClient.CreateSender(destinationQueue);
-            var sender2 = transactionalClient.CreateSender(destinationQueue);
+            var errorQueueSender = transactionalClient.CreateSender(errorQueue);
 
             receiver.ProcessMessageAsync += async processMessageEventArgs =>
             {
@@ -57,9 +58,9 @@ namespace SendVia
 
                 try
                 {
-                    var transaction = new CommittableTransaction(new TransactionOptions()
+                    using var transaction = new CommittableTransaction(new TransactionOptions()
                         { IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout });
-                    int numberOfMessages = 250;
+                    int numberOfMessages = 350;
                     var tasks = new List<Task>(numberOfMessages);
 
                     for (int i = 0; i < numberOfMessages; i++)
@@ -78,8 +79,8 @@ namespace SendVia
                             scope.Complete();
                         }
 
-                        //WrongUsage();
-                        tasks.Add(CorrectUsage());
+                        WrongUsage();
+                        //tasks.Add(CorrectUsage());
                     }
 
                     await Task.WhenAll(tasks);
@@ -89,7 +90,16 @@ namespace SendVia
                 catch (Exception e)
                 {
                     WriteLine(e.Message);
-                    throw;
+                    using var transaction = new CommittableTransaction(new TransactionOptions()
+                        { IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout });
+                    using var scope = new TransactionScope(transaction, TransactionScopeAsyncFlowOption.Enabled);
+
+                    await errorQueueSender.SendMessageAsync(new ServiceBusMessage(processMessageEventArgs.Message));
+
+                    scope.Complete();
+                    transaction.Commit();
+
+                    await processMessageEventArgs.CompleteMessageAsync(processMessageEventArgs.Message);
                 }
                 finally
                 {
