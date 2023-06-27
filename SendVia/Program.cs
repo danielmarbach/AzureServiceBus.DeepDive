@@ -95,7 +95,7 @@ namespace SendVia
                     });
                     using (var scope = new TransactionScope(errorQueueTransaction, TransactionScopeAsyncFlowOption.Enabled))
                     {
-                        await errorQueueSender.SendMessageAsync(new ServiceBusMessage("error"));
+                        await errorQueueSender.SendMessageAsync(new ServiceBusMessage(message));
                         await processMessageEventArgs.CompleteMessageAsync(message);
                         scope.Complete();
 
