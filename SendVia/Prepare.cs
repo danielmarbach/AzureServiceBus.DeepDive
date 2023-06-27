@@ -10,7 +10,11 @@ namespace SendVia
         {
             var client = new ServiceBusAdministrationClient(connectionString);
             if (await client.QueueExistsAsync(inputQueue)) await client.DeleteQueueAsync(inputQueue);
-            await client.CreateQueueAsync(new CreateQueueOptions(inputQueue) { MaxDeliveryCount = 1 });
+            await client.CreateQueueAsync(new CreateQueueOptions(inputQueue)
+            {
+                MaxDeliveryCount = 1,
+                LockDuration = TimeSpan.FromMinutes(5)
+            });
 
             if (await client.QueueExistsAsync(destinationQueue)) await client.DeleteQueueAsync(destinationQueue);
             await client.CreateQueueAsync(destinationQueue);

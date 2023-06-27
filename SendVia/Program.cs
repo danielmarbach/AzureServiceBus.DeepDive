@@ -46,7 +46,10 @@ namespace SendVia
                 //     TryTimeout = TimeSpan.FromSeconds(2)
                 // }
             });
-            var receiver = transactionalClient.CreateProcessor(inputQueue);
+            var receiver = transactionalClient.CreateProcessor(inputQueue, new ServiceBusProcessorOptions
+            {
+                AutoCompleteMessages = false
+            });
             var sender = transactionalClient.CreateSender(destinationQueue);
             var errorQueueSender = transactionalClient.CreateSender(errorQueue);
 
@@ -59,46 +62,47 @@ namespace SendVia
 
                 try
                 {
-                    using var transaction = new CommittableTransaction(new TransactionOptions()
-                        { IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout });
-                    int numberOfMessages = 150;
+                    using var receiveTransaction = new CommittableTransaction(new TransactionOptions()
+                    {
+                        IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout
+                    });
+                    int numberOfMessages = 105;
                     var tasks = new List<Task>(numberOfMessages);
 
                     for (int i = 0; i < numberOfMessages; i++)
                     {
-                        void WrongUsage()
+                        async Task SendMessage(Transaction transaction, int value)
                         {
-                            using var scope = new TransactionScope(transaction, TransactionScopeAsyncFlowOption.Enabled);
-                            tasks.Add(sender.SendMessageAsync(new ServiceBusMessage(i.ToString())));
+                            using var scope = new TransactionScope(transaction,
+                                TransactionScopeAsyncFlowOption.Enabled);
+                            await sender.SendMessageAsync(new ServiceBusMessage(value.ToString()));
                             scope.Complete();
                         }
 
-                        async Task CorrectUsage()
-                        {
-                            using var scope = new TransactionScope(transaction, TransactionScopeAsyncFlowOption.Enabled);
-                            await sender.SendMessageAsync(new ServiceBusMessage(i.ToString()));
-                            scope.Complete();
-                        }
-
-                        //WrongUsage();
-                        tasks.Add(CorrectUsage());
+                        tasks.Add(SendMessage(receiveTransaction, i));
                     }
 
                     await Task.WhenAll(tasks);
 
-                    transaction.Commit();
+                    receiveTransaction.Commit();
                 }
                 catch (Exception e)
                 {
                     WriteLine(e.Message);
-                    using var transaction = new CommittableTransaction(new TransactionOptions()
-                        { IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout });
-                    using var scope = new TransactionScope(transaction, TransactionScopeAsyncFlowOption.Enabled);
+                    using var errorQueueTransaction = new CommittableTransaction(new TransactionOptions()
+                    {
+                        IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout
+                    });
+                    using (var scope = new TransactionScope(errorQueueTransaction, TransactionScopeAsyncFlowOption.Enabled))
+                    {
+                        await errorQueueSender.SendMessageAsync(new ServiceBusMessage("error"));
+                        await processMessageEventArgs.CompleteMessageAsync(message);
+                        scope.Complete();
 
-                    await errorQueueSender.SendMessageAsync(new ServiceBusMessage(message));
-                    await processMessageEventArgs.CompleteMessageAsync(message);
-                    scope.Complete();
-                    transaction.Commit();
+                        // scope needs to be disposed here since actual transaction handover happens on dispose. Yeah I know, silly
+                    }
+
+                    errorQueueTransaction.Commit();
                 }
                 finally
                 {
