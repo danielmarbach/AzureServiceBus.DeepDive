@@ -61,7 +61,7 @@ namespace SendVia
                 {
                     using var transaction = new CommittableTransaction(new TransactionOptions()
                         { IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout });
-                    int numberOfMessages = 250;
+                    int numberOfMessages = 150;
                     var tasks = new List<Task>(numberOfMessages);
 
                     for (int i = 0; i < numberOfMessages; i++)
@@ -96,11 +96,9 @@ namespace SendVia
                     using var scope = new TransactionScope(transaction, TransactionScopeAsyncFlowOption.Enabled);
 
                     await errorQueueSender.SendMessageAsync(new ServiceBusMessage(message));
-
+                    await processMessageEventArgs.CompleteMessageAsync(message);
                     scope.Complete();
                     transaction.Commit();
-
-                    await processMessageEventArgs.CompleteMessageAsync(message);
                 }
                 finally
                 {
