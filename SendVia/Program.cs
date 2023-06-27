@@ -79,8 +79,8 @@ namespace SendVia
                             scope.Complete();
                         }
 
-                        WrongUsage();
-                        //tasks.Add(CorrectUsage());
+                        //WrongUsage();
+                        tasks.Add(CorrectUsage());
                     }
 
                     await Task.WhenAll(tasks);
@@ -104,12 +104,14 @@ namespace SendVia
                 finally
                 {
                     await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+                    await Prepare.ReportNumberOfMessages(connectionString, errorQueue);
                 }
             };
             receiver.ProcessErrorAsync += async e =>
             {
                 WriteLine(e.Exception.Message);
                 await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+                await Prepare.ReportNumberOfMessages(connectionString, errorQueue);
             };
 
             await receiver.StartProcessingAsync();
@@ -117,6 +119,7 @@ namespace SendVia
             ReadLine();
 
             await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
+            await Prepare.ReportNumberOfMessages(connectionString, errorQueue);
 
             await receiver.StopProcessingAsync();
             await receiver.CloseAsync();
