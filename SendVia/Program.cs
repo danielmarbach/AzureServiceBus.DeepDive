@@ -29,8 +29,17 @@ namespace SendVia
             {
                 if(args.EventSource.Name == "Azure-Messaging-ServiceBus" && args.EventName.Contains("Transaction"))
                 {
+                    Console.WriteLine("==================");
                     Console.WriteLine($"{DateTimeOffset.UtcNow:HH:mm:ss:fff} EVENT: {args.EventName}");
                     Console.WriteLine(message);
+                    if (args.PayloadNames != null && args.Payload != null)
+                    {
+                        for (var i = 0; i < args.PayloadNames.Count; i++)
+                        {
+                            Console.WriteLine($"\t{args.PayloadNames[i]}: {args.Payload[i]}");
+                        }
+                    }
+                    Console.WriteLine("==================");
                 }
             }, EventLevel.LogAlways);
 
@@ -87,7 +96,9 @@ namespace SendVia
                         {
                             using var scope = new TransactionScope(transaction,
                                 TransactionScopeAsyncFlowOption.Enabled);
+                            
                             await sender.SendMessageAsync(new ServiceBusMessage(value.ToString()));
+
                             scope.Complete();
                         }
 
