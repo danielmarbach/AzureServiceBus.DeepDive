@@ -7,6 +7,8 @@ using static System.Text.Encoding;
 
 namespace SendVia
 {
+    using System.Diagnostics.Tracing;
+    using Azure.Core.Diagnostics;
     using Azure.Messaging.ServiceBus;
 
     internal class Program
@@ -23,6 +25,15 @@ namespace SendVia
 
         private static async Task Main(string[] args)
         {
+            using AzureEventSourceListener listener = new AzureEventSourceListener((args, message) =>
+            {
+                if(args.EventSource.Name == "Azure-Messaging-ServiceBus" && args.EventName.Contains("Transaction"))
+                {
+                    Console.WriteLine($"{DateTimeOffset.UtcNow:HH:mm:ss:fff} EVENT: {args.EventName}");
+                    Console.WriteLine(message);
+                }
+            }, EventLevel.LogAlways);
+
             await Prepare.Stage(connectionString, inputQueue, destinationQueue, errorQueue);
 
             await using var serviceBusClient = new ServiceBusClient(connectionString, new ServiceBusClientOptions
@@ -57,6 +68,7 @@ namespace SendVia
             {
                 var message = processMessageEventArgs.Message;
 
+                await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
                 await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
                 await Prepare.ReportNumberOfMessages(connectionString, errorQueue);
 
@@ -66,7 +78,7 @@ namespace SendVia
                     {
                         IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout
                     });
-                    int numberOfMessages = 105;
+                    int numberOfMessages = 250;
                     var tasks = new List<Task>(numberOfMessages);
 
                     for (int i = 0; i < numberOfMessages; i++)
@@ -106,6 +118,7 @@ namespace SendVia
                 }
                 finally
                 {
+                    await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
                     await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
                     await Prepare.ReportNumberOfMessages(connectionString, errorQueue);
                 }
@@ -113,6 +126,7 @@ namespace SendVia
             receiver.ProcessErrorAsync += async e =>
             {
                 WriteLine(e.Exception.Message);
+                await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
                 await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
                 await Prepare.ReportNumberOfMessages(connectionString, errorQueue);
             };
@@ -121,6 +135,7 @@ namespace SendVia
 
             ReadLine();
 
+            await Prepare.ReportNumberOfMessages(connectionString, inputQueue);
             await Prepare.ReportNumberOfMessages(connectionString, destinationQueue);
             await Prepare.ReportNumberOfMessages(connectionString, errorQueue);
 
