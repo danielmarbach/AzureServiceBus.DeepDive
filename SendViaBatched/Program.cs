@@ -85,7 +85,7 @@ namespace SendVia
                         IsolationLevel = IsolationLevel.Serializable, Timeout = TransactionManager.MaximumTimeout
                     });
 
-                    int numberOfMessages = 1000;
+                    int numberOfMessages = 10000;
                     var messagesToSend = new Queue<ServiceBusMessage>(numberOfMessages);
                     for (int i = 0; i < numberOfMessages; i++)
                     {
@@ -95,6 +95,7 @@ namespace SendVia
                     int batchCount = 0;
                     int maxItemsPerBatch = 100;
                     var tasks = new List<Task>(numberOfMessages);
+
                     while (messagesToSend.Count > 0)
                     {
                         using ServiceBusMessageBatch messageBatch = await sender.CreateMessageBatchAsync()
@@ -105,16 +106,24 @@ namespace SendVia
                             messagesToSend.Dequeue();
                         }
 
-                        batchCount++;
+                        async Task SendBatch(Transaction transaction, ServiceBusMessageBatch batch)
+                        {
+                            using var scope =  new TransactionScope(receiveTransaction, TransactionScopeAsyncFlowOption.Enabled);
+                            WriteLine($"Sending batch {batchCount + 1}");
+                            await sender.SendMessagesAsync(messageBatch).ConfigureAwait(false);
+                            scope.Complete();
+                        }
 
-                        using var scope =  new TransactionScope(receiveTransaction, TransactionScopeAsyncFlowOption.Enabled);
-                        WriteLine($"Sending batch {batchCount + 1}");
-                        await sender.SendMessagesAsync(messageBatch).ConfigureAwait(false);
-                        scope.Complete();
+                        batchCount++;
+                        tasks.Add(SendBatch(receiveTransaction, messageBatch));
+
+                        // using var scope =  new TransactionScope(receiveTransaction, TransactionScopeAsyncFlowOption.Enabled);
+                        // WriteLine($"Sending batch {batchCount + 1}");
+                        // await sender.SendMessagesAsync(messageBatch).ConfigureAwait(false);
+                        // scope.Complete();
                     }
 
                     await Task.WhenAll(tasks);
-
                     receiveTransaction.Commit();
                 }
                 catch (Exception e)
