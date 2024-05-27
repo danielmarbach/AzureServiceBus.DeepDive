@@ -10,7 +10,10 @@ namespace Batching
         public static async Task<IAsyncDisposable> Stage(string connectionString, string destination)
         {
             var client = new ServiceBusAdministrationClient(connectionString);
-            if (!await client.QueueExistsAsync(destination)) await client.CreateQueueAsync(destination);
+            if (!await client.QueueExistsAsync(destination)) await client.CreateQueueAsync(new CreateQueueOptions(destination)
+            {
+                MaxMessageSizeInKilobytes = 1500
+            });
             return new Leave(connectionString, destination);
         }
 
@@ -20,17 +23,8 @@ namespace Batching
             await client.DeleteQueueAsync(destination);
         }
 
-        sealed class Leave : IAsyncDisposable
+        sealed class Leave(string connectionString, string destination) : IAsyncDisposable
         {
-            readonly string connectionString;
-            readonly string destination;
-
-            public Leave(string connectionString, string destination)
-            {
-                this.connectionString = connectionString;
-                this.destination = destination;
-            }
-
             public async ValueTask DisposeAsync()
             {
                 await LeaveStage(connectionString, destination);

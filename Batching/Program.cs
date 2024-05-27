@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading.Tasks;
-using System.Transactions;
 using static System.Console;
 
 namespace Batching
@@ -23,61 +23,10 @@ namespace Batching
 
             await using var sender = serviceBusClient.CreateSender(destination);
 
-            var messages = new List<ServiceBusMessage>();
-            for (var i = 0; i < 10; i++)
-            {
-                var message = new ServiceBusMessage("Deep Dive{i}");
-                messages.Add(message);
-            }
-
-            WriteLine($"Sending {messages.Count} messages in a batch.");
-            await sender.SendMessagesAsync(messages);
-            messages.Clear();
-            WriteLine();
-
-            for (var i = 0; i < 6500; i++)
-            {
-                var message = new ServiceBusMessage($"Deep Dive{i}");
-                messages.Add(message);
-            }
-
-            try
-            {
-                WriteLine($"Sending {messages.Count} messages in a batch.");
-                await sender.SendMessagesAsync(messages);
-            }
-            catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessageSizeExceeded)
-            {
-                await Error.WriteLineAsync(ex.Message);
-            }
-
-            messages.Clear();
-            WriteLine();
-
-            for (var i = 0; i < 101; i++)
-            {
-                var message = new ServiceBusMessage($"Deep Dive{i}");
-                messages.Add(message);
-            }
-
-            try
-            {
-                using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
-                {
-                    WriteLine($"Sending {messages.Count} messages in a batch with in transaction '{Transaction.Current.TransactionInformation.LocalIdentifier}'.");
-                    await sender.SendMessagesAsync(messages);
-                    scope.Complete();
-                }
-            }
-            catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.QuotaExceeded)
-            {
-                await Error.WriteLineAsync(ex.Message);
-            }
-
             var messagesToSend = new Queue<ServiceBusMessage>();
-            for (var i = 0; i < 4500; i++)
+            for (var i = 0; i < 11; i++)
             {
-                var message = new ServiceBusMessage($"Deep Dive{i}. Deep Dive{i}. Deep Dive{i}.");
+                var message = new ServiceBusMessage(GenerateDataKb(100));
                 messagesToSend.Enqueue(message);
             }
 
@@ -104,6 +53,29 @@ namespace Batching
                 WriteLine($"Sending {messageBatch.Count} messages in a batch {batchCount++}.");
                 await sender.SendMessagesAsync(messageBatch);
             }
+        }
+        
+        static string GenerateDataKb(int nrOfKilobytes)
+        {
+            // Define the size of the string in bytes
+            int sizeInBytes = nrOfKilobytes * 1024; 
+
+            // Create a small string to repeat
+            string smallString = "a";
+
+            // Calculate how many repetitions are needed to reach the desired size
+            int repeatCount = sizeInBytes / Encoding.UTF8.GetByteCount(smallString);
+
+            // Use StringBuilder for efficient string concatenation
+            var sb = new StringBuilder(sizeInBytes);
+
+            for (int i = 0; i < repeatCount; i++)
+            {
+                sb.Append(smallString);
+            }
+
+            // Convert the StringBuilder to a string
+            return sb.ToString();
         }
     }
 }
