@@ -89,15 +89,36 @@ internal class Program
         ["cust789-msg1"] = 2,   // fails attempts 1 & 2, succeeds on the second scheduled retry
     };
 
+    // args: "restart" => run the restart-durability scenario; otherwise the normal
+    // 60s run. The restart scenario publishes, waits for msg2 to fail + schedule its
+    // retry, then tears down the pump + client (simulating a process stop), waits out
+    // the retry delay with NO pump running, and recreates a fresh pump on a new client.
+    // The falsifiable claim: the scheduled message (broker state) + blocked marker
+    // (session state) both survive, and the fresh pump's hold-back reconstructs from
+    // durable state — order still holds, no message orphaned. This is a faithful
+    // simulation of a process restart because the only in-memory state (the cooldown
+    // map) is derived from RetryAfter in session state.
     static async Task Main(string[] args)
     {
+        var restartMode = args.Length > 0 && string.Equals(args[0], "restart", StringComparison.OrdinalIgnoreCase);
         await using var cleanup = await Prepare.Stage(ConnectionString);
 
-        await using var client = new ServiceBusClient(ConnectionString, new ServiceBusClientOptions
+        if (restartMode)
         {
-            TransportType = ServiceBusTransportType.AmqpWebSockets,
-            RetryOptions = new ServiceBusRetryOptions { TryTimeout = TimeSpan.FromSeconds(30) }
-        });
+            await RunRestartScenarioAsync();
+        }
+        else
+        {
+            await RunNormalScenarioAsync();
+        }
+
+        WriteLine();
+        WriteLine("=== Spike complete ===");
+    }
+
+    static async Task RunNormalScenarioAsync()
+    {
+        await using var client = NewClient();
 
         var bridgeCts = new CancellationTokenSource();
         var salesBridgeTask = RunSubscriptionBridgeAsync(Prepare.SalesTopicName, Prepare.SalesSub, "Sales", bridgeCts.Token);
@@ -129,10 +150,69 @@ internal class Program
         try { await dlqTask; } catch (OperationCanceledException) { }
         try { await salesBridgeTask; } catch (OperationCanceledException) { }
         try { await inventoryBridgeTask; } catch (OperationCanceledException) { }
-
-        WriteLine();
-        WriteLine("=== Spike complete ===");
+        try { await concurrentPubTask; } catch (OperationCanceledException) { }
     }
+
+    // Restart-durability scenario. Phase 1 establishes a blocked session with a
+    // scheduled retry in flight, then everything stops. Phase 2 starts a brand-new
+    // pump on a brand-new client after the retry delay has elapsed, and must recover.
+    static async Task RunRestartScenarioAsync()
+    {
+        // ---- Phase 1: bring up infra, publish, let msg2 fail + schedule its retry ----
+        WriteLine("[RESTART] === Phase 1: start, publish, establish block ===");
+        var client1 = NewClient();
+
+        var bridgeCts = new CancellationTokenSource();
+        var salesBridgeTask1 = RunSubscriptionBridgeAsync(Prepare.SalesTopicName, Prepare.SalesSub, "Sales", bridgeCts.Token);
+        var inventoryBridgeTask1 = RunSubscriptionBridgeAsync(Prepare.InventoryTopicName, Prepare.InventorySub, "Inventory", bridgeCts.Token);
+
+        var pumpCts1 = new CancellationTokenSource();
+        var pumpTask1 = RunInputQueuePumpAsync(client1, pumpCts1.Token);
+
+        await Task.Delay(2000);
+        await PublishTestMessagesAsync(client1);
+
+        // Wait long enough for cust123-msg1 to complete, cust123-msg2 to FAIL, the
+        // session to be marked blocked, and the scheduled retry (+6s) to be in flight.
+        // 4s after publish: msg2 has failed, block is set, retry scheduled, pump released
+        // the session. cust789 likewise. Concurrent publisher not started here — keep the
+        // backlog fixed for a deterministic recovery assertion.
+        WriteLine("[RESTART] Letting failures establish + scheduling retries...");
+        await Task.Delay(TimeSpan.FromSeconds(4));
+
+        WriteLine("[RESTART] === STOP: tearing down pump + client (simulating process stop) ===");
+        pumpCts1.Cancel();
+        bridgeCts.Cancel();
+        try { await pumpTask1; } catch (OperationCanceledException) { }
+        try { await salesBridgeTask1; } catch (OperationCanceledException) { }
+        try { await inventoryBridgeTask1; } catch (OperationCanceledException) { }
+        await client1.DisposeAsync();
+
+        // In-memory cooldown is now GONE. Broker still holds: the scheduled retry
+        // messages (normal broker state), the blocked session markers (ASB session
+        // state), and the backlogs (msg3 etc.). Wait past the retry delay with NO pump.
+        WriteLine("[RESTART] === DOWN: no pump running, waiting out retry delay ===");
+        await Task.Delay(TimeSpan.FromSeconds(10));
+
+        // ---- Phase 2: fresh client, fresh pump, empty cooldown. Must recover. ----
+        WriteLine("[RESTART] === START: fresh pump on new client — must recover from durable state ===");
+        await using var client2 = NewClient();
+        var pumpCts2 = new CancellationTokenSource();
+        var pumpTask2 = RunInputQueuePumpAsync(client2, pumpCts2.Token);
+
+        // Give recovery time to run: recall scheduled retries, clear blocks, drain backlog.
+        WriteLine("[RESTART] Waiting 30 seconds for recovery...");
+        await Task.Delay(TimeSpan.FromSeconds(30));
+
+        pumpCts2.Cancel();
+        try { await pumpTask2; } catch (OperationCanceledException) { }
+    }
+
+    static ServiceBusClient NewClient() => new(ConnectionString, new ServiceBusClientOptions
+    {
+        TransportType = ServiceBusTransportType.AmqpWebSockets,
+        RetryOptions = new ServiceBusRetryOptions { TryTimeout = TimeSpan.FromSeconds(30) }
+    });
 
     // ---------------------------------------------------------------
     // SUBSCRIPTION BRIDGE
