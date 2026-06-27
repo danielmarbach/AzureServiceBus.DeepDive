@@ -2,6 +2,8 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.RateLimiting;
@@ -13,7 +15,7 @@ using static System.Console;
 namespace SubscriptionBridge;
 
 // Spike: session-enabled subscription bridge + input queue session pump with
-// blocked-session management.
+// scheduled-resend delayed retries.
 //
 // The shape we're validating:
 //
@@ -25,43 +27,44 @@ namespace SubscriptionBridge;
 //             -> input queue session pump (manual AcceptNextSessionAsync)
 //               -> simulated handler
 //
-// Two design decisions being stress-tested:
+// Recoverability model — SCHEDULED RESEND + peek-and-search hold-back:
 //
-// 1. Cross-entity transactions — the bridge uses EnableCrossEntityTransactions +
-//    TransactionScope to atomically forward from subscription to input queue.
-//    Same pattern as the SendVia example in this repo.
+// When a message fails, the pump:
+//   1. Marks the session BLOCKED in ASB session state (BlockedMessageId = the
+//      failed message's MessageId, RetryAfter = now + delay).
+//   2. Schedules a fresh copy with the SAME SessionId + MessageId and
+//      ScheduledEnqueueTime = now + delay.
+//   3. Completes the original (it's been copied; the scheduled copy IS the retry).
+//   4. Releases the session.
 //
-// 2. Manual session acceptance — using AcceptNextSessionAsync instead of a
-//    SessionProcessor for the input queue pump. The worry is that a SessionProcessor's
-//    prefetch would waste I/O on blocked sessions. Manual acceptance gives us precise
-//    control. Blocked sessions get an in-memory cooldown so we don't spin on re-accepts.
+// The hold-back (peek-and-search):
+//   - When a blocked session is accepted, the pump peeks a window and searches for
+//     BlockedMessageId. If not found (retry scheduled but not yet visible), it
+//     cooldowns until RetryAfter and releases.
+//   - When found, it receives up to and including the match, ABANDONS the backlog
+//     prefix (hold-back), processes ONLY the match, and clears the block on success.
+//   - After unblock, the abandoned backlog re-flows in original order.
 //
-// Session state stores transport metadata (blocked status) as a versioned JSON envelope.
-// The identity-matching mechanism: when a session is blocked, the pump peeks the
-// next message and only processes it if the message's MessageId matches the one stored
-// in session state. That's the "unblock" message. Once it succeeds, the session state
-// is cleared and the rest of the session's messages flow normally.
+// Why scheduled resend over defer:
+//   - Defer strands messages on process restart (deferred messages don't expire to
+//     DLQ; they're only recoverable by peek-scan). Scheduled messages are normal
+//     broker state — no registry, no recovery scan, no orphan risk.
+//   - The peek-and-search hold-back is needed anyway for ServiceControl retries
+//     (which re-send as normal messages behind the backlog), so it's not extra work.
+//   - Trade-off: scheduled copies get fresh sequence numbers, fresh enqueue times,
+//     and reset DeliveryCount. Retry count is carried as an application property.
 internal class Program
 {
     static readonly string ConnectionString =
         Environment.GetEnvironmentVariable("AzureServiceBus_ConnectionString")!;
 
-    // Keeps blocked sessions out of the accept loop for a bit.
-    // Without this, AcceptNextSessionAsync immediately returns the same blocked
-    // session because it still has unconsumed messages.
+    // Keeps blocked sessions out of the accept loop while their retry isn't due yet.
+    // Derived from RetryAfter (not a flat duration) so we don't spin or overshoot.
     static readonly ConcurrentDictionary<string, DateTime> BlockedSessionCooldown = new(StringComparer.OrdinalIgnoreCase);
-    static readonly TimeSpan BlockedCooldownDuration = TimeSpan.FromSeconds(10);
 
-    // Limits how many concurrent session processing slots are in use.
-    // Workers that can't acquire a permit go back to accepting — keeps us from
-    // overcommitting while still having enough accept goroutines to stay busy.
     static readonly ConcurrencyLimiter SessionConcurrency =
         new(new ConcurrencyLimiterOptions { PermitLimit = 3, QueueLimit = 0 });
 
-    // Throttles how fast we attempt AcceptNextSessionAsync.
-    // TokenBucket gives a steady cadence: burst up to 3 accepts immediately,
-    // then one every 200ms. QueueLimit is unbounded so workers always wait
-    // for a token instead of being rejected.
     static readonly TokenBucketRateLimiter AcceptThrottle =
         new(new TokenBucketRateLimiterOptions
         {
@@ -71,6 +74,20 @@ internal class Program
             QueueLimit = int.MaxValue,
             AutoReplenishment = true
         });
+
+    // --- Delayed-retry configuration (scheduled resend) ---
+    static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(6);
+    const int MaxAttempts = 5;
+
+    // Per-MessageId simulated failure budget: fail on the first N handling attempts,
+    // then succeed. The scheduled copy carries the same MessageId, so the budget
+    // naturally spans original + retries.
+    static readonly ConcurrentDictionary<string, int> FailureAttempts = new();
+    static readonly Dictionary<string, int> FailureBudget = new()
+    {
+        ["cust123-msg2"] = 1,   // fails attempt 1, succeeds on the scheduled retry
+        ["cust789-msg1"] = 2,   // fails attempts 1 & 2, succeeds on the second scheduled retry
+    };
 
     static async Task Main(string[] args)
     {
@@ -82,23 +99,24 @@ internal class Program
             RetryOptions = new ServiceBusRetryOptions { TryTimeout = TimeSpan.FromSeconds(30) }
         });
 
-        // Bridge forwarders — one per subscription, both writing to the same input queue
         var bridgeCts = new CancellationTokenSource();
         var salesBridgeTask = RunSubscriptionBridgeAsync(Prepare.SalesTopicName, Prepare.SalesSub, "Sales", bridgeCts.Token);
         var inventoryBridgeTask = RunSubscriptionBridgeAsync(Prepare.InventoryTopicName, Prepare.InventorySub, "Inventory", bridgeCts.Token);
 
-        // Input queue pump — consumes from the session-enabled input queue
         var pumpCts = new CancellationTokenSource();
         var pumpTask = RunInputQueuePumpAsync(client, pumpCts.Token);
 
-        // DLQ retry processor — simulates what ServiceControl would do
         var dlqCts = new CancellationTokenSource();
         var dlqTask = RunDlqRetryProcessorAsync(client, dlqCts.Token);
 
-        // Let the infrastructure settle before publishing
         await Task.Delay(2000);
 
         await PublishTestMessagesAsync(client);
+
+        // Concurrent producer: keeps feeding Customer-123 WHILE msg2's retry is
+        // scheduled. The hold-back must prevent ALL of these (and msg3) from
+        // completing before msg2's scheduled retry succeeds.
+        var concurrentPubTask = RunConcurrentPublisherAsync(client, bridgeCts.Token);
 
         WriteLine("[MAIN] Waiting 60 seconds for processing...");
         await Task.Delay(TimeSpan.FromSeconds(60));
@@ -120,21 +138,6 @@ internal class Program
     // SUBSCRIPTION BRIDGE
     // ---------------------------------------------------------------
 
-    // Boring session processor that copies messages from one session-enabled
-    // subscription into the session-enabled input queue.
-    //
-    // Two instances run: one for sales-sub, one for inventory-sub. Both write
-    // to the same input queue. This validates that multiple ordered subscriptions
-    // can feed into one shared input queue without cross-subscription ordering
-    // guarantees — each subscription preserves its own per-session order.
-    //
-    // Uses cross-entity transactions (EnableCrossEntityTransactions + TransactionScope)
-    // for atomic receive-send-complete. Same pattern as the SendVia example in this repo.
-    //
-    // If the send fails, the subscription message stays locked and gets redelivered.
-    // If the connection drops after send but before the complete ack, the input queue
-    // gets a duplicate. That's acceptable for a bridge if handlers are idempotent,
-    // which they should be anyway.
     static async Task RunSubscriptionBridgeAsync(string topicName, string subscriptionName, string label, CancellationToken ct)
     {
         var bridgeClient = new ServiceBusClient(ConnectionString, new ServiceBusClientOptions
@@ -152,11 +155,11 @@ internal class Program
             subscriptionName,
             new ServiceBusSessionProcessorOptions
             {
-                AutoCompleteMessages = false,  // We manage completion inside the TransactionScope
+                AutoCompleteMessages = false,
                 MaxConcurrentSessions = 3,
                 MaxConcurrentCallsPerSession = 1,
                 SessionIdleTimeout = TimeSpan.FromSeconds(3),
-                PrefetchCount = 100,  // Bottleneck-free forwarder, no reason to limit this
+                PrefetchCount = 100,
                 ReceiveMode = ServiceBusReceiveMode.PeekLock
             });
 
@@ -167,25 +170,13 @@ internal class Program
 
             WriteLine($"[BRIDGE-{label}] Received '{message.MessageId}' on session '{sessionId}'");
 
-            // Wrap send + complete in a TransactionScope. With EnableCrossEntityTransactions,
-            // both go through the same AMQP link and commit atomically.
             using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
             {
-                // The SDK's built-in copy constructor copies body, SessionId (GroupId),
-                // app properties, annotations, headers. DeliveryCount is set to null
-                // (fresh message). Broker annotations (seq#, enqueued-time, locked-until)
-                // are excluded — so the copy gets fresh values from the input queue.
                 var forwarded = new ServiceBusMessage(message);
-
-                // Setting SessionId also syncs PartitionKey
                 forwarded.SessionId = sessionId;
-
                 await inputQueueSender.SendMessageAsync(forwarded, ct);
-
                 WriteLine($"[BRIDGE-{label}] Sent to input queue, completing source...");
-
                 await args.CompleteMessageAsync(message, ct);
-
                 scope.Complete();
             }
 
@@ -218,29 +209,19 @@ internal class Program
     // INPUT QUEUE SESSION PUMP
     // ---------------------------------------------------------------
 
-    // Spawns a pool of accept workers. Each worker loops:
-    //   1. Throttle: wait for the TokenBucket to allow an accept attempt
-    //   2. Acquire: call AcceptNextSessionAsync
-    //   3. Permit: acquire a ConcurrencyLimiter slot before processing
-    //   4. Process: hand off to ProcessSessionAsync, then release permit
-    //
-    // Using two rate limiters:
-    //   - TokenBucketRateLimiter — smooths the accept cadence (~1 per 200ms)
-    //   - ConcurrencyLimiter — caps how many sessions are held simultaneously
-    //
-    // This is cleaner than ad-hoc Task.Delay calls and manual task tracking.
     static async Task RunInputQueuePumpAsync(ServiceBusClient client, CancellationToken ct)
     {
         const int AcceptWorkers = 5;
-        var stats = SessionConcurrency.GetStatistics();
-        var availablePermits = stats?.CurrentAvailablePermits ?? 0;
-        WriteLine($"[PUMP] Starting ({AcceptWorkers} accept workers, concurrency limited to {availablePermits}, manual AcceptNextSessionAsync)...");
+        WriteLine($"[PUMP] Starting ({AcceptWorkers} accept workers, concurrency limited to 3, manual AcceptNextSessionAsync)...");
+
+        // One sender for scheduled resends — reused across all workers.
+        await using var inputQueueSender = client.CreateSender(Prepare.InputQueueName);
 
         var workers = new Task[AcceptWorkers];
         for (int i = 0; i < AcceptWorkers; i++)
         {
             var workerId = i + 1;
-            workers[i] = RunPumpWorkerAsync(client, workerId, ct);
+            workers[i] = RunPumpWorkerAsync(client, inputQueueSender, workerId, ct);
         }
 
         try
@@ -249,23 +230,12 @@ internal class Program
         }
         catch (OperationCanceledException)
         {
-            // Expected on shutdown
         }
 
         WriteLine("[PUMP] Stopped");
     }
 
-    // Each worker loops:
-    //   1. Acquire concurrency permit (cap how many sessions process at once)
-    //   2. Throttle accept rate (TokenBucket, ~1 per 200ms)
-    //   3. Accept a session
-    //   4. Check in-memory cooldown — skip blocked sessions
-    //   5. Process the session
-    //   6. Release the permit (finally)
-    //
-    // Permit-first: we never accept a session we can't immediately process.
-    // The 3-permit limit means we hold at most 3 session locks at any time.
-    static async Task RunPumpWorkerAsync(ServiceBusClient client, int workerId, CancellationToken ct)
+    static async Task RunPumpWorkerAsync(ServiceBusClient client, ServiceBusSender inputQueueSender, int workerId, CancellationToken ct)
     {
         WriteLine($"[PUMP-{workerId}] Started");
 
@@ -276,51 +246,40 @@ internal class Program
 
             try
             {
-                // Step 1: acquire a concurrency permit FIRST.
-                // This represents "I have capacity to process one session right now."
-                // If all permits are taken, we wait until one frees up.
-                concurrencyLease = await SessionConcurrency.AcquireAsync(
-                    permitCount: 1, ct);
-
+                concurrencyLease = await SessionConcurrency.AcquireAsync(1, ct);
                 if (!concurrencyLease.IsAcquired)
                 {
                     await Task.Delay(100, ct);
                     continue;
                 }
 
-                // Step 2: throttle the accept rate so we don't hammer the broker
-                using var throttleLease = await AcceptThrottle.AcquireAsync(
-                    permitCount: 1, ct);
-
+                using var throttleLease = await AcceptThrottle.AcquireAsync(1, ct);
                 if (!throttleLease.IsAcquired)
                 {
                     await Task.Delay(100, ct);
                     continue;
                 }
 
-                // Step 3: accept a session
                 sessionReceiver = await client.AcceptNextSessionAsync(
                     Prepare.InputQueueName,
                     new ServiceBusSessionReceiverOptions
                     {
                         ReceiveMode = ServiceBusReceiveMode.PeekLock,
-                        PrefetchCount = 0  // Precise control — no prefetch
+                        PrefetchCount = 0
                     },
                     ct);
 
                 var sessionId = sessionReceiver.SessionId;
-                WriteLine($"[PUMP-{workerId}] Accepted session '{sessionId}'");
 
-                // In-memory cooldown check before reading session state.
+                // Cooldown check: skip blocked sessions whose retry isn't due yet.
+                // Prevents hot-spinning on blocked sessions during the retry delay.
                 if (IsSessionInCooldown(sessionId))
                 {
-                    WriteLine($"[PUMP-{workerId}] Session '{sessionId}' is in cooldown — skipping");
                     await ReleaseSessionAsync(sessionReceiver, sessionId);
                     continue;
                 }
 
-                // Steps 4–5: process, then release the permit in finally
-                await ProcessSessionAsync(sessionReceiver, sessionId, workerId, ct);
+                await ProcessSessionAsync(sessionReceiver, inputQueueSender, sessionId, workerId, ct);
             }
             catch (OperationCanceledException)
             {
@@ -348,46 +307,23 @@ internal class Program
         WriteLine($"[PUMP-{workerId}] Stopped");
     }
 
-    // Processes a single session. When a session is blocked, we peek the next message.
-    // Only the message whose MessageId matches the stored BlockedMessageId is the
-    // "unblock" message. Everything else ahead of it gets deferred (we release and
-    // let the cooldown handle the retry).
+    // Processes a single session. Two paths:
     //
-    // Once the unblock message succeeds, session state is cleared and remaining
-    // messages in the session flow normally on subsequent pump iterations.
+    // BLOCKED: The session is pinned to BlockedMessageId by a prior failure. The pump
+    // peeks for that MessageId. If the scheduled retry hasn't arrived yet, cooldown +
+    // release. If it has arrived, receive up to it, abandon the backlog prefix (hold-
+    // back), process ONLY the match, clear block on success. The abandoned backlog
+    // re-flows on the next accept in original order.
     //
-    // availablePermits caps how many messages we pull at once — no point fetching
-    // this session, one session at a time.
-    static async Task ProcessSessionAsync(ServiceBusSessionReceiver receiver, string sessionId, int workerId, CancellationToken ct)
+    // CLEAR: Normal FIFO receive + process.
+    static async Task ProcessSessionAsync(ServiceBusSessionReceiver receiver, ServiceBusSender inputQueueSender, string sessionId, int workerId, CancellationToken ct)
     {
         var sessionState = await ReadSessionStateAsync(receiver, ct);
 
         if (sessionState.IsBlocked)
         {
-            WriteLine($"[PUMP-{workerId}] Session '{sessionId}' is BLOCKED (by msg '{sessionState.BlockedMessageId}'). Checking for unblock message...");
-
-            var nextMsg = await receiver.PeekMessageAsync(cancellationToken: ct);
-
-            if (nextMsg == null)
-            {
-                WriteLine($"[PUMP-{workerId}]   No messages in blocked session — releasing.");
-                AddBlockedCooldown(sessionId, workerId);
-                await ReleaseSessionAsync(receiver, sessionId);
-                return;
-            }
-
-            if (string.Equals(nextMsg.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal))
-            {
-                WriteLine($"[PUMP-{workerId}]   Found unblock message '{nextMsg.MessageId}' — will process it.");
-                // Fall through — ReceiveMessagesAsync will consume it and we check again
-            }
-            else
-            {
-                WriteLine($"[PUMP-{workerId}]   Next msg is '{nextMsg.MessageId}' — doesn't match blocked '{sessionState.BlockedMessageId}'. Releasing.");
-                AddBlockedCooldown(sessionId, workerId);
-                await ReleaseSessionAsync(receiver, sessionId);
-                return;
-            }
+            await ProcessBlockedSessionAsync(receiver, inputQueueSender, sessionId, sessionState, workerId, ct);
+            return;
         }
 
         WriteLine($"[PUMP-{workerId}] Session '{sessionId}' is clear. Receiving messages...");
@@ -400,55 +336,91 @@ internal class Program
         if (messages.Count == 0)
         {
             WriteLine($"[PUMP-{workerId}] Session '{sessionId}' has no messages. Releasing.");
-            await ReleaseSessionAsync(receiver, sessionId);
+            await ReleaseSessionAsync(receiver, sessionId, workerId);
             return;
         }
 
         foreach (var message in messages)
         {
             if (ct.IsCancellationRequested) break;
+            var ok = await TryHandleAsync(receiver, inputQueueSender, message, sessionId, workerId, ct);
+            if (!ok) break; // session blocked by a failure; stop draining this batch
+        }
 
-            try
+        await ReleaseSessionAsync(receiver, sessionId, workerId);
+    }
+
+    // Hold-back logic for a blocked session. Peeks for BlockedMessageId:
+    //   - Not found → retry not yet visible → cooldown until RetryAfter, release.
+    //   - Found → receive batch, abandon prefix, process match, clear block.
+    static async Task ProcessBlockedSessionAsync(ServiceBusSessionReceiver receiver, ServiceBusSender inputQueueSender, string sessionId, SessionState sessionState, int workerId, CancellationToken ct)
+    {
+        WriteLine($"[PUMP-{workerId}] Session '{sessionId}' BLOCKED on '{sessionState.BlockedMessageId}'. Peeking for scheduled retry...");
+
+        // Peek a window. If the scheduled retry hasn't been enqueued yet (its
+        // ScheduledEnqueueTime is in the future), it won't appear here.
+        var peeked = await receiver.PeekMessagesAsync(maxMessages: 32, cancellationToken: ct);
+        var matchSeq = peeked.FirstOrDefault(m =>
+            string.Equals(m.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal))?.SequenceNumber;
+
+        if (matchSeq == null)
+        {
+            // Retry not yet visible. Cooldown until RetryAfter so we don't spin.
+            var cooldownUntil = sessionState.RetryAfter ?? DateTimeOffset.UtcNow.AddSeconds(1);
+            if (cooldownUntil > DateTimeOffset.UtcNow)
             {
-                var body = Encoding.UTF8.GetString(message.Body);
-                WriteLine($"[PUMP-{workerId}]   Processing '{message.MessageId}' (session '{sessionId}'): {body}");
-
-                if (message.ApplicationProperties.TryGetValue("SimulateFailure", out var flag)
-                    && flag is bool shouldFail && shouldFail)
-                {
-                    throw new InvalidOperationException($"Simulated failure for '{message.MessageId}'");
-                }
-
-                await receiver.CompleteMessageAsync(message, ct);
-                WriteLine($"[PUMP-{workerId}]   Completed '{message.MessageId}'");
-
-                // If this was the unblock message, clear session state so remaining
-                // messages in the session can be picked up next iteration.
-                if (sessionState.IsBlocked && string.Equals(message.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal))
-                {
-                    await ClearSessionBlockedStateAsync(receiver, sessionId, workerId);
-                    WriteLine($"[PUMP-{workerId}]   Unblock message completed — session '{sessionId}' is now UNBLOCKED");
-                    BlockedSessionCooldown.TryRemove(sessionId, out _);
-                }
+                BlockedSessionCooldown[sessionId] = cooldownUntil.UtcDateTime;
             }
-            catch (Exception ex)
+            var wait = cooldownUntil - DateTimeOffset.UtcNow;
+            WriteLine($"[PUMP-{workerId}]   Retry not yet visible — cooldown {(int)Math.Ceiling(wait.TotalSeconds)}s. Releasing.");
+            await ReleaseSessionAsync(receiver, sessionId, workerId);
+            return;
+        }
+
+        WriteLine($"[PUMP-{workerId}]   Found blocked message (seq {matchSeq}) — draining to it...");
+
+        // Receive a batch. The match should be within it (we just peeked it). Messages
+        // before the match are backlog that arrived while blocked — abandon them so they
+        // re-flow after unblock. This is the hold-back: they are NOT processed.
+        var messages = await receiver.ReceiveMessagesAsync(
+            maxMessages: 32,
+            maxWaitTime: TimeSpan.FromSeconds(2),
+            ct);
+
+        var blockCleared = false;
+
+        foreach (var message in messages)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            if (!blockCleared && !string.Equals(message.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal))
             {
-                WriteLine($"[PUMP-{workerId}]   FAILED '{message.MessageId}': {ex.Message}");
-
-                await MarkSessionBlockedAsync(receiver, sessionId, message.MessageId, workerId);
-
-                await receiver.DeadLetterMessageAsync(
-                    message,
-                    deadLetterReason: "ProcessingFailure",
-                    deadLetterErrorDescription: ex.Message,
-                    cancellationToken: ct);
-
-                WriteLine($"[PUMP-{workerId}]   Dead-lettered '{message.MessageId}', session '{sessionId}' = BLOCKED");
-
-                // Remaining messages in this session stay in the queue.
-                // The cooldown prevents tight re-accept loops.
-                break;
+                // Backlog before the retry — hold back by abandoning. It becomes available
+                // again and re-flows in original order once the block clears.
+                await receiver.AbandonMessageAsync(message, cancellationToken: ct);
+                WriteLine($"[PUMP-{workerId}]   Held back '{message.MessageId}' (ahead of blocked msg) — abandoned.");
+                continue;
             }
+
+            // This is the blocked message (or block already cleared). Process it.
+            var ok = await TryHandleAsync(receiver, inputQueueSender, message, sessionId, workerId, ct);
+
+            if (ok && !blockCleared)
+            {
+                // The blocked message succeeded — clear the block.
+                await ClearSessionBlockedStateAsync(receiver, sessionId, workerId);
+                blockCleared = true;
+                WriteLine($"[PUMP-{workerId}]   Unblock message completed — session '{sessionId}' UNBLOCKED");
+            }
+
+            if (!ok) break; // re-blocked by a new failure; stop draining
+        }
+
+        if (!blockCleared && !ct.IsCancellationRequested)
+        {
+            // The peek showed the match but it wasn't in the received batch (edge race).
+            // Cooldown briefly and let the next accept retry.
+            BlockedSessionCooldown[sessionId] = DateTime.UtcNow.AddSeconds(1);
         }
 
         await ReleaseSessionAsync(receiver, sessionId, workerId);
@@ -458,8 +430,6 @@ internal class Program
     // SESSION STATE HELPERS
     // ---------------------------------------------------------------
 
-    // Reads the transport-managed session state from ASB. Returns default
-    // (unblocked) if nothing is stored or parsing fails.
     static async Task<SessionState> ReadSessionStateAsync(ServiceBusSessionReceiver receiver, CancellationToken ct)
     {
         try
@@ -477,30 +447,87 @@ internal class Program
         }
     }
 
-    // Stores the blocked marker + the failed message's MessageId in ASB session state.
+    // Marks the session blocked in ASB session state (durable). The scheduled retry
+    // is a normal broker message — no registry needed; the hold-back reads this state
+    // on every accept and peeks for BlockedMessageId.
     static async Task MarkSessionBlockedAsync(ServiceBusSessionReceiver receiver, string sessionId, string failedMessageId, int workerId)
     {
+        var retryAfter = DateTimeOffset.UtcNow + RetryDelay;
         var state = new SessionState
         {
             IsBlocked = true,
             BlockedMessageId = failedMessageId,
-            BlockedAt = DateTimeOffset.UtcNow
+            BlockedAt = DateTimeOffset.UtcNow,
+            RetryAfter = retryAfter
         };
 
-        var binaryData = BinaryData.FromBytes(Encoding.UTF8.GetBytes(state.ToJson()));
-        await receiver.SetSessionStateAsync(binaryData);
-        WriteLine($"[PUMP-{workerId}] Session state: '{sessionId}' = BLOCKED (msg: {failedMessageId})");
+        await receiver.SetSessionStateAsync(BinaryData.FromBytes(Encoding.UTF8.GetBytes(state.ToJson())));
+        WriteLine($"[PUMP-{workerId}] Session state: '{sessionId}' = BLOCKED (msg: {failedMessageId}, retry in {(int)RetryDelay.TotalSeconds}s)");
     }
 
-    // Clears ASB session state entirely — null means no blocking metadata.
+    // Handle a single message. On success: complete + return true. On failure: schedule
+    // a delayed resend (same SessionId + MessageId), complete the original, mark session
+    // blocked, return false. On terminal failure (attempts exhausted): DLQ + clear block.
+    static async Task<bool> TryHandleAsync(ServiceBusSessionReceiver receiver, ServiceBusSender inputQueueSender, ServiceBusReceivedMessage message, string sessionId, int workerId, CancellationToken ct)
+    {
+        var body = Encoding.UTF8.GetString(message.Body);
+        WriteLine($"[PUMP-{workerId}]   Processing '{message.MessageId}' (session '{sessionId}'): {body}");
+
+        var attempts = FailureAttempts.AddOrUpdate(message.MessageId, 1, (_, c) => c + 1);
+
+        try
+        {
+            if (FailureBudget.TryGetValue(message.MessageId, out var budget) && attempts <= budget)
+            {
+                throw new InvalidOperationException($"Simulated failure #{attempts} for '{message.MessageId}'");
+            }
+
+            await receiver.CompleteMessageAsync(message, ct);
+            WriteLine($"[PUMP-{workerId}]   Completed '{message.MessageId}'");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            WriteLine($"[PUMP-{workerId}]   FAILED '{message.MessageId}': {ex.Message}");
+
+            if (attempts >= MaxAttempts)
+            {
+                await receiver.DeadLetterMessageAsync(message, deadLetterReason: "MaxRetriesExceeded", deadLetterErrorDescription: ex.Message, cancellationToken: ct);
+                await ClearSessionBlockedStateAsync(receiver, sessionId, workerId);
+                WriteLine($"[PUMP-{workerId}]   Terminal failure '{message.MessageId}' -> DLQ (attempt {attempts} >= {MaxAttempts}). Backlog may now flow.");
+                return false;
+            }
+
+            // Schedule a delayed resend. Same SessionId + MessageId so the hold-back
+            // finds it via peek-and-search. The scheduled message is normal broker
+            // state — survives restart, no registry, no orphan risk.
+            var resend = new ServiceBusMessage(message.Body)
+            {
+                MessageId = message.MessageId,
+                SessionId = sessionId,
+                ScheduledEnqueueTime = DateTimeOffset.UtcNow + RetryDelay
+            };
+            resend.ApplicationProperties["RetryCount"] = attempts;
+
+            // Order: mark blocked FIRST (durable hold-back), then schedule, then complete.
+            // If we crash after marking blocked, the original re-delivers on lock expiry
+            // and the pump re-processes it under the block — correct.
+            await MarkSessionBlockedAsync(receiver, sessionId, message.MessageId, workerId);
+            await inputQueueSender.SendMessageAsync(resend, ct);
+            await receiver.CompleteMessageAsync(message, ct);
+
+            WriteLine($"[PUMP-{workerId}]   Scheduled resend of '{message.MessageId}' (+{(int)RetryDelay.TotalSeconds}s), original completed, session BLOCKED — backlog held.");
+            return false;
+        }
+    }
+
     static async Task ClearSessionBlockedStateAsync(ServiceBusSessionReceiver receiver, string sessionId, int workerId)
     {
         await receiver.SetSessionStateAsync(null as BinaryData);
+        BlockedSessionCooldown.TryRemove(sessionId, out _);
         WriteLine($"[PUMP-{workerId}] Session state: '{sessionId}' = UNBLOCKED");
     }
 
-    // Releases a session receiver by closing it. Subsequent pump iterations
-    // can then re-accept the session.
     static async Task ReleaseSessionAsync(ServiceBusSessionReceiver receiver, string sessionId, int? workerId = null)
     {
         var tag = workerId.HasValue ? $"[PUMP-{workerId}]" : "[PUMP]";
@@ -515,24 +542,12 @@ internal class Program
         }
     }
 
-    // Adds the session to the in-memory cooldown map. The pump will skip it
-    // until the cooldown expires. Gives the DLQ retry processor time to operate
-    // without us spinning on re-accepts.
-    static void AddBlockedCooldown(string sessionId, int? workerId = null)
-    {
-        BlockedSessionCooldown[sessionId] = DateTime.UtcNow + BlockedCooldownDuration;
-        var tag = workerId.HasValue ? $"[PUMP-{workerId}]" : "[PUMP]";
-        WriteLine($"{tag} Cooldown set for '{sessionId}' ({BlockedCooldownDuration.TotalSeconds}s)");
-    }
-
     static bool IsSessionInCooldown(string sessionId)
     {
         if (BlockedSessionCooldown.TryGetValue(sessionId, out var cooldownUntil))
         {
             if (DateTime.UtcNow < cooldownUntil)
                 return true;
-
-            // Cooldown expired — clean up and allow
             BlockedSessionCooldown.TryRemove(sessionId, out _);
         }
         return false;
@@ -542,17 +557,12 @@ internal class Program
     // DLQ RETRY PROCESSOR
     // ---------------------------------------------------------------
 
-    // Reads from the dead-letter queue (sales-input/$DeadLetterQueue) and re-sends
-    // messages back to the input queue. Simulates what ServiceControl would do in
-    // a production setup.
-    //
-    // On retry, clears the failed session's blocked state so the pump can process
-    // the retried message (and any backlogged messages in that session). The pump's
-    // identity-matching logic then takes over — only the retried message (matching
-    // by MessageId) unblocks the session.
+    // Reads from the dead-letter queue and re-sends messages back to the input queue.
+    // Simulates what ServiceControl would do. Re-sent messages land as normal messages
+    // behind the backlog; the peek-and-search hold-back handles them identically to
+    // scheduled resends (same SessionId + MessageId identity matching).
     static async Task RunDlqRetryProcessorAsync(ServiceBusClient client, CancellationToken ct)
     {
-        // Give the pump time to dead-letter before we scan the DLQ
         try { await Task.Delay(TimeSpan.FromSeconds(10), ct); } catch (OperationCanceledException) { return; }
 
         WriteLine("[DLQ] Starting DLQ retry processor...");
@@ -577,11 +587,9 @@ internal class Program
 
             await using var sender = client.CreateSender(Prepare.InputQueueName);
 
-            // Create a copy and strip the failure flag and DLQ annotations
             var retryMessage = new ServiceBusMessage(message);
-            retryMessage.ApplicationProperties.Remove("SimulateFailure");
+            retryMessage.SessionId = message.SessionId;
 
-            // Track retry count to avoid infinite DLQ loops
             var retryCount = 0;
             if (message.ApplicationProperties.TryGetValue("RetryCount", out var rc) && rc is int existingCount)
             {
@@ -599,23 +607,16 @@ internal class Program
 
             WriteLine($"[DLQ] Retry #{retryCount} for '{message.MessageId}'");
 
-            // The copy constructor copies GroupId, but setting SessionId explicitly
-            // also syncs PartitionKey — needed for partitioned entities.
-            retryMessage.SessionId = message.SessionId;
-
             await sender.SendMessageAsync(retryMessage, ct);
             WriteLine($"[DLQ] Re-sent '{message.MessageId}' to input queue (session '{message.SessionId}')");
 
             await args.CompleteMessageAsync(message, ct);
             WriteLine($"[DLQ] Completed DLQ message '{message.MessageId}'");
 
-            // Clear the session state so the pump can accept the session again.
-            // The pump's identity-matching will let only the retried message through.
             if (!string.IsNullOrEmpty(message.SessionId))
             {
-                await ClearSessionBlockedStateForSessionAsync(client, message.SessionId, ct);
                 BlockedSessionCooldown.TryRemove(message.SessionId, out _);
-                WriteLine($"[DLQ] Cleared blocked state + cooldown for session '{message.SessionId}'");
+                WriteLine($"[DLQ] Cleared cooldown for session '{message.SessionId}'");
             }
         };
 
@@ -639,42 +640,6 @@ internal class Program
         }
     }
 
-    // Opens a temporary session receiver to clear the blocked session state.
-    // This is a simulation shortcut — a real ServiceControl retry would preserve
-    // headers that the pump correlates to decide which message unblocks the session.
-    static async Task ClearSessionBlockedStateForSessionAsync(ServiceBusClient client, string sessionId, CancellationToken ct)
-    {
-        try
-        {
-            var receiver = await client.AcceptSessionAsync(
-                Prepare.InputQueueName,
-                sessionId,
-                new ServiceBusSessionReceiverOptions
-                {
-                    ReceiveMode = ServiceBusReceiveMode.PeekLock,
-                    PrefetchCount = 0
-                },
-                ct);
-
-            await using var _ = receiver;
-
-            await receiver.SetSessionStateAsync(null as BinaryData, ct);
-            WriteLine($"[DLQ] Cleared session state for '{sessionId}'");
-
-            await receiver.CloseAsync();
-        }
-        catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.SessionCannotBeLocked)
-        {
-            // Session might be locked by the pump — that's fine. The pump will
-            // eventually check session state after the cooldown expires.
-            WriteLine($"[DLQ] Could not lock session '{sessionId}' for state clear (being processed): {ex.Message}");
-        }
-        catch (Exception ex)
-        {
-            WriteLine($"[DLQ] Warning clearing session state for '{sessionId}': {ex.Message}");
-        }
-    }
-
     // ---------------------------------------------------------------
     // TEST MESSAGES
     // ---------------------------------------------------------------
@@ -687,7 +652,6 @@ internal class Program
         WriteLine();
         WriteLine("=== Publishing sales messages ===");
 
-        // Session "Customer-123": msg1 succeeds, msg2 fails (blocks the session), msg3 stuck
         var m1 = new ServiceBusMessage("Order received for Customer-123")
         { MessageId = "cust123-msg1", SessionId = "Customer-123" };
         await salesSender.SendMessageAsync(m1);
@@ -695,7 +659,6 @@ internal class Program
 
         var m2 = new ServiceBusMessage("Payment processing for Customer-123")
         { MessageId = "cust123-msg2", SessionId = "Customer-123" };
-        m2.ApplicationProperties["SimulateFailure"] = true;
         await salesSender.SendMessageAsync(m2);
         WriteLine($"  Published '{m2.MessageId}' (session: Customer-123) [WILL FAIL]");
 
@@ -704,7 +667,6 @@ internal class Program
         await salesSender.SendMessageAsync(m3);
         WriteLine($"  Published '{m3.MessageId}' (session: Customer-123)");
 
-        // Session "Customer-456": all succeed — happy path
         var m4 = new ServiceBusMessage("Order received for Customer-456")
         { MessageId = "cust456-msg1", SessionId = "Customer-456" };
         await salesSender.SendMessageAsync(m4);
@@ -715,18 +677,14 @@ internal class Program
         await salesSender.SendMessageAsync(m5);
         WriteLine($"  Published '{m5.MessageId}' (session: Customer-456)");
 
-        // Session "Customer-789": fails immediately — exercises the DLQ retry path
         var m6 = new ServiceBusMessage("Order for Customer-789")
         { MessageId = "cust789-msg1", SessionId = "Customer-789" };
-        m6.ApplicationProperties["SimulateFailure"] = true;
         await salesSender.SendMessageAsync(m6);
         WriteLine($"  Published '{m6.MessageId}' (session: Customer-789) [WILL FAIL]");
 
         WriteLine();
         WriteLine("=== Publishing inventory messages ===");
 
-        // Inventory session "Stock-001": from a different topic + subscription.
-        // The inventory bridge forwards them into the same input queue.
         var i1 = new ServiceBusMessage("Stock level check for SKU-001")
         { MessageId = "stock001-msg1", SessionId = "Stock-001" };
         await inventorySender.SendMessageAsync(i1);
@@ -737,7 +695,6 @@ internal class Program
         await inventorySender.SendMessageAsync(i2);
         WriteLine($"  Published '{i2.MessageId}' (session: Stock-001)");
 
-        // Inventory session "Stock-002": another independent session.
         var i3 = new ServiceBusMessage("Stock level check for SKU-002")
         { MessageId = "stock002-msg1", SessionId = "Stock-002" };
         await inventorySender.SendMessageAsync(i3);
@@ -746,20 +703,38 @@ internal class Program
         WriteLine("=== Publishing complete ===");
         WriteLine();
     }
+
+    // Concurrent publisher: emits extra messages into Customer-123 AFTER msg2 has
+    // (hopefully) already failed and been scheduled for resend. These land behind
+    // msg3 in the session. The hold-back must prevent ALL of them from completing
+    // before msg2's scheduled retry succeeds.
+    static async Task RunConcurrentPublisherAsync(ServiceBusClient client, CancellationToken ct)
+    {
+        try { await Task.Delay(TimeSpan.FromSeconds(3), ct); } catch (OperationCanceledException) { return; }
+
+        await using var sender = client.CreateSender(Prepare.SalesTopicName);
+        for (int i = 5; i <= 7; i++)
+        {
+            if (ct.IsCancellationRequested) return;
+            var m = new ServiceBusMessage($"Concurrent update #{i - 4} for Customer-123")
+            { MessageId = $"cust123-msg{i}", SessionId = "Customer-123" };
+            await sender.SendMessageAsync(m, ct);
+            WriteLine($"  [CONCURRENT] Published '{m.MessageId}' (session: Customer-123)");
+            try { await Task.Delay(TimeSpan.FromSeconds(1), ct); } catch (OperationCanceledException) { return; }
+        }
+    }
 }
 
 // ---------------------------------------------------------------
 // SESSION STATE (versioned JSON envelope)
 // ---------------------------------------------------------------
 
-// Transport-managed session state stored in ASB session state.
-// The transport owns the "transport" section; user code owns a separate "user" section.
-// This record only models the transport side for the spike.
 public record SessionState
 {
     public bool IsBlocked { get; init; }
     public string? BlockedMessageId { get; init; }
     public DateTimeOffset? BlockedAt { get; init; }
+    public DateTimeOffset? RetryAfter { get; init; }
 
     public static SessionState Default => new() { IsBlocked = false };
 
@@ -767,12 +742,13 @@ public record SessionState
     {
         return System.Text.Json.JsonSerializer.Serialize(new
         {
-            version = 1,
+            version = 3,
             transport = new
             {
                 blocked = IsBlocked,
                 blockedMessageId = BlockedMessageId,
-                blockedAt = BlockedAt?.ToString("O")
+                blockedAt = BlockedAt?.ToString("O"),
+                retryAfter = RetryAfter?.ToString("O")
             }
         });
     }
@@ -792,6 +768,9 @@ public record SessionState
                 BlockedMessageId = t.GetProperty("blockedMessageId").GetString(),
                 BlockedAt = t.TryGetProperty("blockedAt", out var ba) && ba.ValueKind == System.Text.Json.JsonValueKind.String
                     ? DateTimeOffset.Parse(ba.GetString()!)
+                    : null,
+                RetryAfter = t.TryGetProperty("retryAfter", out var ra) && ra.ValueKind == System.Text.Json.JsonValueKind.String
+                    ? DateTimeOffset.Parse(ra.GetString()!)
                     : null
             };
         }
