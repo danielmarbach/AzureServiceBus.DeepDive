@@ -246,6 +246,8 @@ Scheduled resend has none of that fragility. The scheduled message is normal bro
 
 So scheduled resend is the core. The honest trade-offs: the retried message gets a fresh sequence number, fresh enqueue time, and reset `DeliveryCount` each time, and it costs one extra send per retry. We carry the attempt count as an application property (`RetryCount`) rather than relying on the broker's delivery count.
 
+One refinement that fell out of looking closer at the hold-back: `ScheduleMessageAsync` returns the scheduled message's sequence number, and we persist that in session state alongside the block. So when the pump comes back to a blocked session, it can address the retry directly with a one-message peek instead of scanning the backlog — `O(1)` instead of `O(backlog)`. That makes the large-backlog correctness concern go away entirely for pump-scheduled retries. The scan stays as a fallback for the two cases where the stored seq is unknown or stale: a crash between schedule and state write, and an external ServiceControl retry (we didn't schedule that one, so there's no seq to address). The seq survives restart because it lives in session state, and sessions are exclusive-lock, so even with multiple pump instances the instance that picks up the session on restart reads the same state — scale-out isn't a problem for the fast path.
+
 ### Where hold-and-sleep still fits
 
 For short delays — I'd say up to about two or three seconds — holding the session lock and sleeping is cheaper than the resend bookkeeping: no abandon churn, no extra send, ordering trivially preserved because `A2…A4` stay locked behind `A1`, and `DeliveryCount` is not burned by the delay. My current leaning is a layered design:
