@@ -16,7 +16,7 @@ public static class Prepare
     {
         var client = new ServiceBusAdministrationClient(connectionString);
 
-        // Cleanup existing entities
+        // Clean up anything left over from a previous run, so each run starts clean.
         var cleanupTasks = new[]
         {
             TryDeleteQueue(client, InputQueue),
@@ -27,14 +27,15 @@ public static class Prepare
         };
         await Task.WhenAll(cleanupTasks);
 
-        // Create topics
+        // Create the topics.
         foreach (var topic in new[] { SalesTopic, InventoryTopic })
         {
             var topicOptions = new CreateTopicOptions(topic);
             await client.CreateTopicAsync(topicOptions);
         }
 
-        // Create session-enabled subscriptions WITHOUT ForwardTo
+        // Session-enabled subscriptions, deliberately without ForwardTo — that's the
+        // whole reason the bridge exists (ASB won't auto-forward from a session sub).
         foreach (var (topic, sub) in new[] {
             (SalesTopic, SalesSubscription),
             (InventoryTopic, InventorySubscription)
@@ -58,7 +59,8 @@ public static class Prepare
             await client.CreateRuleAsync(topic, sub, ruleOptions);
         }
 
-        // Create session-enabled input queue
+        // The session-enabled input queue. Every ordered stream converges here, and
+        // this is where recoverability and the hold-back live.
         var queueOptions = new CreateQueueOptions(InputQueue)
         {
             RequiresSession = true,
