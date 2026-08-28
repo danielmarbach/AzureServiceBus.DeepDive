@@ -157,12 +157,14 @@ For example:
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "transport": {
     "blocked": true,
     "blockedMessageId": "nservicebus-message-id",
     "blockedAt": "2026-06-27T12:00:00Z",
-    "retryAfter": "2026-06-27T12:00:06Z"
+    "retryAfter": "2026-06-27T12:00:06Z",
+    "scheduledSequenceNumber": 11,
+    "lastPeekedSequenceNumber": 15
   },
   "user": {
     "contentType": "application/json",
@@ -218,13 +220,15 @@ On failure of a message `M` in session `S`:
 3. Complete the original — the scheduled copy *is* the retry.
 4. Release the session.
 
-The hold-back, on every accept of a blocked session, peeks a window and searches for `BlockedMessageId`:
+The hold-back, on every accept of a blocked session, checks `RetryAfter` first — the retry cannot be visible before its scheduled enqueue time, so there is no point scanning for it — then peeks a window and searches for `BlockedMessageId`:
 
 ```text
-not found   -> retry not yet visible -> cooldown until RetryAfter, release
-found       -> receive forward past the backlog, leaving it LOCKED but unsettled,
-               process ONLY the match, clear block on success
-after clear -> the locked backlog re-flows on session close, in original order
+not due yet   -> cooldown until RetryAfter, release (no scan)
+due, not found -> scan from the stored seq / persisted frontier, persist the frontier,
+                  cooldown briefly, release
+found         -> receive forward past the backlog, leaving it LOCKED but unsettled,
+                 process ONLY the match, clear block on success
+after clear   -> the locked backlog re-flows on session close, in original order
 ```
 
 A deliberate choice: the hold-back **never abandons** the backlog prefix. Abandoning re-serves the same messages to the head, so a retry that fails again re-abandons the same prefix on every pass and inflates `DeliveryCount` until the backlog dead-letters without ever being processed. Instead we receive forward past the backlog and close the session with the messages unsettled — per ASB session semantics, closing a session with unsettled messages re-flows them **without** incrementing `DeliveryCount` (the increment only happens on lock *expiry* or explicit abandon). So a multi-retry failure re-runs the hold-back with zero delivery churn. Receiving forward (rather than one fixed-size batch) is also what lets the hold-back reach a retry buried deeper than a single batch — the abandoned-prefix approach could never get past the re-flowed head.
@@ -248,7 +252,7 @@ Scheduled resend has none of that fragility. The scheduled message is normal bro
 
 So scheduled resend is the core. The honest trade-offs: the retried message gets a fresh sequence number, fresh enqueue time, and reset `DeliveryCount` each time, and it costs one extra send per retry. We carry the attempt count as an application property (`RetryCount`) rather than relying on the broker's delivery count.
 
-One refinement that fell out of looking closer at the hold-back: `ScheduleMessageAsync` returns a sequence number, and we persist it in session state alongside the block. The live spike falsified the original assumption that this is the retry's address — ASB sequences scheduled messages at **enqueue** time, not schedule time, so the returned seq is always *behind* the retry's actual position (measured: returned 1, enqueued at 5; returned 11, enqueued at 16). So the stored seq is a **lower bound**, and the hold-back uses it as the scan's starting point: page forward from the stored seq instead of re-walking the head. That keeps the scan `O(retry position − stored seq)` instead of `O(backlog)`, and it is safe precisely because the retry always lands at or after the stored seq — unlike a persisted peek frontier, which can advance *past* the retry's position when the retry isn't enqueued yet and new arrivals push the frontier beyond it, stranding the session. When the seq is missing (crash between schedule and state write) or the retry is external (ServiceControl bring-back), the scan starts from the head. The seq survives restart because it lives in session state, and sessions are exclusive-lock, so even with multiple pump instances the instance that picks up the session on restart reads the same state — scale-out isn't a problem.
+One refinement that fell out of looking closer at the hold-back: `ScheduleMessageAsync` returns a sequence number, and we persist it in session state alongside the block. The live spike falsified the original assumption that this is the retry's address — ASB sequences scheduled messages at **enqueue** time, not schedule time, so the returned seq is always *behind* the retry's actual position (measured: returned 1, enqueued at 5; returned 11, enqueued at 16). So the stored seq is a **lower bound**, and the hold-back uses it as the scan's starting point: page forward from the stored seq instead of re-walking the head. That keeps the scan `O(retry position − stored seq)` instead of `O(backlog)`, and it is safe precisely because the retry always lands at or after the stored seq. The scan's frontier is also persisted (`LastPeekedSequenceNumber`): when the retry is due but not enqueued (broker lag, or the client clock running ahead of the broker), the scan runs off the end and records how far it got, so the next pass — and a restarted pump — resumes from there instead of re-walking the backlog. That is safe for the same reason the stored seq is: the frontier is only advanced while the retry is not enqueued, and ASB assigns seqs at enqueue time, so everything the scan has ruled out is strictly below the retry's eventual seq. When the seq is missing (crash between schedule and state write) or the retry is external (ServiceControl bring-back), the scan starts from the head. The seq survives restart because it lives in session state, and sessions are exclusive-lock, so even with multiple pump instances the instance that picks up the session on restart reads the same state — scale-out isn't a problem.
 
 ### Where hold-and-sleep still fits
 
