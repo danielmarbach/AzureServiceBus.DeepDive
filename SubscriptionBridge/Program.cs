@@ -442,39 +442,41 @@ internal class Program
     //   - Not found by the end of the session → retry not visible yet → cooldown, release.
     //   - Found → receive forward past the locked backlog, process the match, clear block.
     //
-    // The frontier is per-scan, not persisted. Each accept gets a fresh receiver, so a
-    // new scan starts at the head and pages forward. The retry gets a fresh, higher
-    // sequence number when it's eventually enqueued (after the delay), so paging
-    // forward through the backlog is what lets us actually find it when the backlog
-    // grows past a single peek window.
+    // The scan starts from the stored ScheduledSequenceNumber when present — a safe lower
+    // bound on the retry's position (ASB sequences scheduled messages at enqueue time, so
+    // the retry always lands at or after the stored seq) — and from the head otherwise.
+    // The retry gets a fresh, higher sequence number when it's eventually enqueued (after
+    // the delay), so paging forward from the stored seq is what lets us actually find it
+    // when the backlog grows past a single peek window.
     static async Task ProcessBlockedSessionAsync(ServiceBusSessionReceiver receiver, ServiceBusSender inputQueueSender, string sessionId, SessionState sessionState, int workerId, CancellationToken ct)
     {
         WriteLine($"[PUMP-{workerId}] Session '{sessionId}' BLOCKED on '{sessionState.BlockedMessageId}'. Locating scheduled retry...");
 
-        // Fast path: we stored the scheduled retry's sequence number when we blocked, so
-        // address it directly with a one-message peek. O(1), and it sidesteps any backlog
-        // ahead of the retry entirely.
-        long? matchSeq = null;
-        if (sessionState.ScheduledSequenceNumber is long knownSeq)
+        // The retry is scheduled for RetryAfter — it cannot be visible before then, so
+        // there is no point peeking or scanning for it. Cooldown until RetryAfter and
+        // release; the next accept after the delay scans for it (starting from the stored
+        // seq). This is what keeps the hold-back from re-walking a large backlog on every
+        // accept while the retry is still in the future.
+        if (sessionState.RetryAfter is DateTimeOffset retryAfter && retryAfter > DateTimeOffset.UtcNow)
         {
-            var direct = await receiver.PeekMessagesAsync(1, knownSeq, ct);
-            var hit = direct.FirstOrDefault(m =>
-                string.Equals(m.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal));
-            if (hit != null)
-            {
-                matchSeq = hit.SequenceNumber;
-                WriteLine($"[PUMP-{workerId}]   Addressed retry directly at seq {knownSeq}.");
-            }
+            BlockedSessionCooldown[sessionId] = retryAfter.UtcDateTime;
+            var wait = retryAfter - DateTimeOffset.UtcNow;
+            WriteLine($"[PUMP-{workerId}]   Retry not due until +{(int)Math.Ceiling(wait.TotalSeconds)}s — cooldown. Releasing.");
+            await ReleaseSessionAsync(receiver, sessionId, workerId);
+            return;
         }
 
-        // Fallback scan: page through the backlog by MessageId. Covers the cases the fast
-        // path can't — a crash between schedule and state write (seq missing), an external
-        // ServiceControl retry (seq unknown), or the stored seq being stale. If the
-        // scheduled retry hasn't been enqueued yet (ScheduledEnqueueTime still in the
-        // future) the scan runs off the end without finding it and we cooldown.
-        if (matchSeq == null)
+        // Locate the retry by MessageId. The stored seq (from ScheduleMessageAsync) is a
+        // LOWER BOUND on the retry's position, not its address: ASB assigns a scheduled
+        // message's sequence number at enqueue time, not schedule time, so the retry lands
+        // at or after the stored seq (verified against a live namespace — the returned seq
+        // was 1, the message was enqueued at 5). Starting the scan there skips the
+        // already-ruled-out backlog instead of re-walking the head. When the seq is missing
+        // (crash between schedule and state write) or the retry is external (ServiceControl
+        // bring-back), the scan starts from the head and pages forward.
+        long? matchSeq = null;
         {
-            long? fromSeq = null;
+            long? fromSeq = sessionState.ScheduledSequenceNumber;
             const int peekBatch = 32;
             while (!ct.IsCancellationRequested)
             {
@@ -487,8 +489,7 @@ internal class Program
                 if (match != null)
                 {
                     matchSeq = match.SequenceNumber;
-                    if (sessionState.ScheduledSequenceNumber != null)
-                        WriteLine($"[PUMP-{workerId}]   Stored seq {sessionState.ScheduledSequenceNumber} missed; found retry at {matchSeq} via scan.");
+                    WriteLine($"[PUMP-{workerId}]   Found retry at seq {matchSeq} (scan from seq {fromSeq ?? 0}).");
                     break;
                 }
 
@@ -503,14 +504,12 @@ internal class Program
 
         if (matchSeq == null)
         {
-            // Retry not visible yet. Cooldown until RetryAfter so we don't spin.
-            var cooldownUntil = sessionState.RetryAfter ?? DateTimeOffset.UtcNow.AddSeconds(1);
-            if (cooldownUntil > DateTimeOffset.UtcNow)
-            {
-                BlockedSessionCooldown[sessionId] = cooldownUntil.UtcDateTime;
-            }
-            var wait = cooldownUntil - DateTimeOffset.UtcNow;
-            WriteLine($"[PUMP-{workerId}]   Retry not yet visible — cooldown {(int)Math.Ceiling(wait.TotalSeconds)}s. Releasing.");
+            // The retry is due (RetryAfter passed) but not visible — broker lag, or the
+            // stored seq is missing/stale (crash between schedule and state write). The
+            // scan already walked the session and found nothing. Cooldown briefly so we
+            // don't hot-spin, then try again.
+            BlockedSessionCooldown[sessionId] = DateTime.UtcNow.AddSeconds(1);
+            WriteLine($"[PUMP-{workerId}]   Retry due but not visible — cooldown 1s. Releasing.");
             await ReleaseSessionAsync(receiver, sessionId, workerId);
             return;
         }
@@ -591,10 +590,12 @@ internal class Program
     }
 
     // Marks the session blocked in ASB session state, which is what makes it durable.
-    // We also store the scheduled retry's sequence number (returned by
-    // ScheduleMessageAsync) so the hold-back can address the retry directly instead of
-    // scanning the backlog. The fallback scan still covers restarts and external retries
-    // where the seq is unknown.
+    // We also store the sequence number returned by ScheduleMessageAsync. Note this is a
+    // LOWER BOUND on the retry's position, not its address — ASB sequences scheduled
+    // messages at enqueue time, so the stored seq is always behind the retry's actual
+    // seq. The hold-back uses it as the scan's starting point, which skips the backlog
+    // instead of re-walking the head. When the seq is missing (crash between schedule
+    // and state write) or the retry is external, the scan starts from the head.
     static async Task MarkSessionBlockedAsync(ServiceBusSessionReceiver receiver, string sessionId, string failedMessageId, long scheduledSequenceNumber, int workerId)
     {
         var retryAfter = DateTimeOffset.UtcNow + RetryDelay;
@@ -915,9 +916,11 @@ public record SessionState
     public DateTimeOffset? BlockedAt { get; init; }
     public DateTimeOffset? RetryAfter { get; init; }
     // The sequence number returned by ScheduleMessageAsync when the pump scheduled the
-    // retry. Lets the hold-back address the retry directly instead of scanning the
-    // backlog. Null on restart-recovery or for external retries, where we fall back to a
-    // MessageId scan.
+    // retry. A LOWER BOUND on the retry's position, not its address — ASB sequences
+    // scheduled messages at enqueue time, so the retry always lands at or after this.
+    // The hold-back uses it as the scan's starting point, skipping the backlog instead
+    // of re-walking the head. Null on restart-recovery or for external retries, where
+    // the scan starts from the head.
     public long? ScheduledSequenceNumber { get; init; }
 
     public static SessionState Default => new() { IsBlocked = false };
