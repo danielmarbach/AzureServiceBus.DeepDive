@@ -474,15 +474,28 @@ internal class Program
         // already-ruled-out backlog instead of re-walking the head. When the seq is missing
         // (crash between schedule and state write) or the retry is external (ServiceControl
         // bring-back), the scan starts from the head and pages forward.
+        //
+        // The scan's frontier (LastPeekedSequenceNumber) is persisted in session state so
+        // a scan that runs off the end without finding the retry (broker lag, or the client
+        // clock running ahead of the broker) resumes from where it left off instead of
+        // re-walking the backlog — and a restarted pump picks up the same frontier. This is
+        // safe because the frontier is only advanced while the retry is NOT enqueued, and a
+        // message's seq is assigned at enqueue time, so everything the scan has ruled out
+        // is strictly below the retry's eventual seq.
         long? matchSeq = null;
+        long? lastPeeked = null;
         {
             long? fromSeq = sessionState.ScheduledSequenceNumber;
+            if (sessionState.LastPeekedSequenceNumber is long lp && lp > fromSeq)
+                fromSeq = lp;
             const int peekBatch = 32;
             while (!ct.IsCancellationRequested)
             {
                 var peeked = await receiver.PeekMessagesAsync(peekBatch, fromSeq, ct);
                 if (peeked.Count == 0)
                     break; // session exhausted; retry not visible yet
+
+                lastPeeked = peeked.Max(m => m.SequenceNumber);
 
                 var match = peeked.FirstOrDefault(m =>
                     string.Equals(m.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal));
@@ -498,7 +511,7 @@ internal class Program
                     break;
 
                 // Advance the frontier past what we just ruled out.
-                fromSeq = peeked.Max(m => m.SequenceNumber) + 1;
+                fromSeq = lastPeeked + 1;
             }
         }
 
@@ -506,8 +519,15 @@ internal class Program
         {
             // The retry is due (RetryAfter passed) but not visible — broker lag, or the
             // stored seq is missing/stale (crash between schedule and state write). The
-            // scan already walked the session and found nothing. Cooldown briefly so we
-            // don't hot-spin, then try again.
+            // scan already walked the session and found nothing. Persist the frontier so
+            // the next scan (and a restarted pump) resumes from here instead of re-walking
+            // the backlog, then cooldown briefly so we don't hot-spin.
+            if (lastPeeked is long lp && lp > (sessionState.LastPeekedSequenceNumber ?? 0))
+            {
+                var updated = sessionState with { LastPeekedSequenceNumber = lp };
+                await receiver.SetSessionStateAsync(BinaryData.FromBytes(Encoding.UTF8.GetBytes(updated.ToJson())));
+                WriteLine($"[PUMP-{workerId}]   Persisted peek frontier at seq {lp}.");
+            }
             BlockedSessionCooldown[sessionId] = DateTime.UtcNow.AddSeconds(1);
             WriteLine($"[PUMP-{workerId}]   Retry due but not visible — cooldown 1s. Releasing.");
             await ReleaseSessionAsync(receiver, sessionId, workerId);
@@ -922,6 +942,13 @@ public record SessionState
     // of re-walking the head. Null on restart-recovery or for external retries, where
     // the scan starts from the head.
     public long? ScheduledSequenceNumber { get; init; }
+    // The furthest sequence number the hold-back's scan has peeked without finding the
+    // retry. Persisted so a scan that runs off the end (retry due but not enqueued —
+    // broker lag or client clock ahead of the broker) resumes from here instead of
+    // re-walking the backlog, and a restarted pump picks up the same frontier. Safe
+    // because it is only advanced while the retry is not enqueued, and seqs are assigned
+    // at enqueue time, so everything ruled out is below the retry's eventual seq.
+    public long? LastPeekedSequenceNumber { get; init; }
 
     public static SessionState Default => new() { IsBlocked = false };
 
@@ -929,14 +956,15 @@ public record SessionState
     {
         return System.Text.Json.JsonSerializer.Serialize(new
         {
-            version = 4,
+            version = 5,
             transport = new
             {
                 blocked = IsBlocked,
                 blockedMessageId = BlockedMessageId,
                 blockedAt = BlockedAt?.ToString("O"),
                 retryAfter = RetryAfter?.ToString("O"),
-                scheduledSequenceNumber = ScheduledSequenceNumber
+                scheduledSequenceNumber = ScheduledSequenceNumber,
+                lastPeekedSequenceNumber = LastPeekedSequenceNumber
             }
         });
     }
@@ -962,6 +990,9 @@ public record SessionState
                     : null,
                 ScheduledSequenceNumber = t.TryGetProperty("scheduledSequenceNumber", out var ssn) && ssn.ValueKind == System.Text.Json.JsonValueKind.Number
                     ? ssn.GetInt64()
+                    : null,
+                LastPeekedSequenceNumber = t.TryGetProperty("lastPeekedSequenceNumber", out var lpsn) && lpsn.ValueKind == System.Text.Json.JsonValueKind.Number
+                    ? lpsn.GetInt64()
                     : null
             };
         }
