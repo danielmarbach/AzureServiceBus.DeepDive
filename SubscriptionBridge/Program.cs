@@ -396,9 +396,10 @@ internal class Program
     //
     // BLOCKED: the session is pinned to BlockedMessageId by a prior failure. We peek
     // for that MessageId. If the scheduled retry hasn't turned up yet, cooldown and
-    // release. If it has, we receive up to it, abandon the backlog prefix (the hold-
-    // back), process ONLY the match, and clear the block on success. The abandoned
-    // backlog re-flows on the next accept, in original order.
+    // release. If it has, we receive forward past the backlog (leaving it locked,
+    // never abandoning it), process ONLY the match, and clear the block on success.
+    // The locked backlog re-flows on session close — without burning DeliveryCount —
+    // and is processed in original order on the next accept.
     //
     // CLEAR: ordinary FIFO receive and process.
     static async Task ProcessSessionAsync(ServiceBusSessionReceiver receiver, ServiceBusSender inputQueueSender, string sessionId, int workerId, CancellationToken ct)
@@ -439,7 +440,7 @@ internal class Program
     // advancing a peek frontier, so we skip backlog we've already ruled out instead
     // of re-walking the head on every peek:
     //   - Not found by the end of the session → retry not visible yet → cooldown, release.
-    //   - Found → receive the batch, abandon the prefix, process the match, clear block.
+    //   - Found → receive forward past the locked backlog, process the match, clear block.
     //
     // The frontier is per-scan, not persisted. Each accept gets a fresh receiver, so a
     // new scan starts at the head and pages forward. The retry gets a fresh, higher
@@ -516,49 +517,53 @@ internal class Program
 
         WriteLine($"[PUMP-{workerId}]   Found blocked message (seq {matchSeq}) — draining to it...");
 
-        // Receive a batch — the match should be in it, we just peeked it. Messages
-        // before the match are backlog that arrived while the session was blocked, so
-        // we abandon them to re-flow after unblock. This is the hold-back: we do not
-        // process them.
-        var messages = await receiver.ReceiveMessagesAsync(
-            maxMessages: 32,
-            maxWaitTime: TimeSpan.FromSeconds(2),
-            ct);
-
-        var blockCleared = false;
-
-        foreach (var message in messages)
+        // Receive forward until the retry turns up, leaving the backlog ahead of it
+        // LOCKED but unsettled. We deliberately do NOT abandon the backlog: per ASB
+        // session semantics, closing a session with unsettled messages re-flows them
+        // without incrementing DeliveryCount, so a retry that fails again re-runs this
+        // hold-back without burning a delivery on every backlog message. Abandoning
+        // would re-serve the same prefix to the head on every pass and inflate
+        // DeliveryCount until the backlog dead-letters without ever being processed.
+        // Receiving forward (instead of one 32-message batch) is also what lets the
+        // hold-back reach a retry buried deeper than one batch — the abandoned-prefix
+        // approach could never get past the re-flowed head.
+        ServiceBusReceivedMessage? retryMessage = null;
+        while (!ct.IsCancellationRequested)
         {
-            if (ct.IsCancellationRequested) break;
+            var batch = await receiver.ReceiveMessagesAsync(
+                maxMessages: 32,
+                maxWaitTime: TimeSpan.FromSeconds(2),
+                ct);
 
-            if (!blockCleared && !string.Equals(message.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal))
-            {
-                // Backlog ahead of the retry — hold it back by abandoning. It becomes
-                // available again and re-flows in original order once the block clears.
-                await receiver.AbandonMessageAsync(message, cancellationToken: ct);
-                WriteLine($"[PUMP-{workerId}]   Held back '{message.MessageId}' (ahead of blocked msg) — abandoned.");
-                continue;
-            }
+            if (batch.Count == 0)
+                break; // session exhausted; the retry we peeked is gone — edge race
 
-            // This is the blocked message, or the block has already cleared. Process it.
-            var ok = await TryHandleAsync(receiver, inputQueueSender, message, sessionId, workerId, ct);
-
-            if (ok && !blockCleared)
-            {
-                // The blocked message succeeded — clear the block.
-                await ClearSessionBlockedStateAsync(receiver, sessionId, workerId);
-                blockCleared = true;
-                WriteLine($"[PUMP-{workerId}]   Unblock message completed — session '{sessionId}' UNBLOCKED");
-            }
-
-            if (!ok) break; // a new failure re-blocked the session; stop draining
+            retryMessage = batch.FirstOrDefault(m =>
+                string.Equals(m.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal));
+            if (retryMessage != null)
+                break;
         }
 
-        if (!blockCleared && !ct.IsCancellationRequested)
+        if (retryMessage == null)
         {
-            // We peeked the match but it didn't turn up in the received batch — an edge
-            // race. Cooldown briefly and let the next accept try again.
+            // We peeked the match but it didn't turn up in the received batches — an
+            // edge race. Cooldown briefly and let the next accept try again. The locked
+            // backlog re-flows on close, so nothing is lost.
             BlockedSessionCooldown[sessionId] = DateTime.UtcNow.AddSeconds(1);
+            await ReleaseSessionAsync(receiver, sessionId, workerId);
+            return;
+        }
+
+        // Process ONLY the retry. Everything else in the session — the locked backlog
+        // ahead of it and any messages we received past it — re-flows on close and is
+        // processed in original order on the next accept. Processing past the retry in
+        // this accept would let post-retry messages jump ahead of the held-back backlog.
+        var ok = await TryHandleAsync(receiver, inputQueueSender, retryMessage, sessionId, workerId, ct);
+
+        if (ok)
+        {
+            await ClearSessionBlockedStateAsync(receiver, sessionId, workerId);
+            WriteLine($"[PUMP-{workerId}]   Unblock message completed — session '{sessionId}' UNBLOCKED");
         }
 
         await ReleaseSessionAsync(receiver, sessionId, workerId);
