@@ -64,6 +64,8 @@ public static class Prepare
         var queueOptions = new CreateQueueOptions(InputQueue)
         {
             RequiresSession = true,
+            RequiresDuplicateDetection = true,
+            DuplicateDetectionHistoryTimeWindow = TimeSpan.FromMinutes(10),
             DefaultMessageTimeToLive = TimeSpan.FromMinutes(10),
             DeadLetteringOnMessageExpiration = true,
             MaxDeliveryCount = 10
@@ -73,7 +75,7 @@ public static class Prepare
         Console.WriteLine("=== Infrastructure created ===");
         Console.WriteLine($"  Topic: {SalesTopic} -> Subscription: {SalesSubscription} (session-enabled, no ForwardTo)");
         Console.WriteLine($"  Topic: {InventoryTopic} -> Subscription: {InventorySubscription} (session-enabled, no ForwardTo)");
-        Console.WriteLine($"  Input Queue: {InputQueue} (session-enabled, shared)");
+        Console.WriteLine($"  Input Queue: {InputQueue} (session-enabled, duplicate detection enabled, shared)");
         Console.WriteLine();
 
         return new Cleanup(connectionString);
