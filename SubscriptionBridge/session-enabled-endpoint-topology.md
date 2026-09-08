@@ -1,12 +1,8 @@
 # Session-enabled endpoints with ordered subscriptions
 
-> Status note: this started as a design proposal and then became the record of a spike that tested it. The proposal sections are mostly still as I first wrote them, because the reasoning still holds. The parts the spike actually settled — mostly recoverability — are updated, and there's a section at the end with what we proved and what I think is still open. Please don't hesitate to challenge any of it.
-
 ## Short version
 
-I think we should avoid consuming ordered subscriptions directly into handlers.
-
-My current leaning — and now also what the spike backs up — is that, when sessions are enabled, the endpoint input queue should become the ordered processing boundary. Ordered subscriptions are still consumed by the transport, but only as a bridge into the endpoint input queue.
+Ordered subscriptions should not be consumed directly into handlers. When sessions are enabled, the endpoint input queue is the ordered processing boundary. Ordered subscriptions are consumed by the transport only as a bridge into that queue.
 
 ```text
 publisher
@@ -20,15 +16,13 @@ publisher
 
 The important part is that the handler pipeline still sees one endpoint input queue. The subscription receivers are an implementation detail of the transport.
 
-I might still be missing something, but from where I stand this seems like a cleaner model than making subscriptions firstclass receive endpoints, and the spike didn't surface anything that changes that.
+This keeps subscriptions as transport infrastructure rather than making them first-class application receive endpoints.
 
 ## Why I think the current direction feels off
 
 Azure Service Bus does not allow auto-forwarding from a session-enabled subscription. That part is not really up for debate.
 
-The conclusion I am less convinced about is that we therefore need to consume directly from subscriptions into the endpoint pipeline, or force users into many small endpoints for every ordered event group.
-
-That feels like we would be letting an Azure Service Bus infrastructure limitation leak too far into the NServiceBus programming model.
+The broker constraint does not require consuming subscriptions directly into the endpoint pipeline or forcing users into many small endpoints for every ordered event group. A transport-owned bridge keeps that infrastructure limitation out of the application programming model.
 
 Today our topology is built around this model:
 
@@ -43,7 +37,7 @@ The code reflects that. We create subscriptions with `ForwardTo = inputQueue` in
 
 That gives us a nice property: the endpoint has one input queue that represents its work. Recoverability, ServiceControl retry, monitoring, and operational visibility all line up around that queue.
 
-I think we should preserve that property if we can.
+That property remains useful for recoverability, monitoring, and operational visibility.
 
 ## Proposal
 
@@ -69,25 +63,21 @@ send to endpoint input queue
 complete the subscription message after the send succeeds
 ```
 
-The input queue session pump is where we put the recoverability and blocking logic.
+The input queue session pump is where we put the recoverability and blocking logic. Scheduled delayed retries and terminal DLQ bring-backs use the same durable hold-back.
 
 ## Why this seems better
 
 ### We keep the endpoint model intact
 
-Users still have an endpoint input queue, and I think that matters.
+Users still have an endpoint input queue as the common processing boundary.
 
 If a message fails, gets moved to the error queue, is picked up by ServiceControl, and is later retried, it naturally comes back to the endpoint input queue. That is the place where we can inspect the session state and decide whether this message unblocks the session.
 
-If we consume directly from subscriptions, we now have several receive points that all need to understand recoverability, blocking, retries, concurrency, and shutdown. I am not convinced that is worth it.
+Direct subscription consumption would distribute recoverability, blocking, retry, concurrency, and shutdown behavior across several receive points.
 
 ### We relocate back-pressure to the right place
 
-This is an argument I think is underweighted. Without `ForwardTo`, messages sit in the subscription until the bridge drains them, and subscriptions count against the **topic's** size quota. A stalled session subscription can push the whole topic toward quota and throttle publishers across every subscription on that topic.
-
-The bridge drains into the endpoint input queue, so the buffering lives on the **endpoint queue's** quota instead. That is where I want the capacity decision to live: the endpoint owns its own pressure, and one stalled endpoint no longer starves sibling subscribers on the same topic.
-
-I don't want to oversell this — we are relocating back-pressure, not removing it. If the input queue rejects the send, the cross-entity transaction aborts and the pressure still propagates back to the topic. And ASB's own `ForwardTo` failure mode dead-letters at the source to protect the topic; our bridge does not have that escape valve yet. I think we need one. That is in the open-items list.
+Without `ForwardTo`, messages remain in the subscription until the bridge drains them, and subscriptions count against the **topic's** size quota. While the input queue accepts sends, the bridge moves normal buffering to the **endpoint queue's** quota. During destination failure, the processor can hold a bounded active source delivery; repeated send failures and redeliveries can consume delivery attempts and eventually dead-letter the source message. No deliberate production escape or critical-error policy exists for that condition yet. The bridge relocates buffering pressure while the destination has capacity; it does not remove back-pressure.
 
 ### We solve session blocking once
 
@@ -105,7 +95,7 @@ skip/release Customer-123
 continue with Customer-456
 ```
 
-I would much rather have that decision in one input queue pump than repeat it across direct subscription pumps.
+Keeping that decision in one input queue pump avoids repeating it across direct subscription pumps.
 
 ### It gives commands and events the same input boundary
 
@@ -131,11 +121,10 @@ So the guarantee is:
 
 > We preserve ordered endpoint processing per session at the input queue boundary. For bridged subscriptions, we preserve the source subscription's per-session order into that boundary where possible. We do not claim a global order across independent topics, subscriptions, commands, or retries because Azure Service Bus does not provide such a global order either.
 
-I think that is fine. It is probably the only meaningful guarantee we can make without inventing a distributed ordering coordinator on top of Service Bus.
+This is the meaningful guarantee available without inventing a distributed ordering coordinator on top of Service Bus.
 
-## The mental model that sharpened during the spike
+## The ordering model
 
-I want to call this out explicitly because it changed how I think about the recoverability section.
 
 A session gives us two things, and only two: happy-path FIFO (when nothing fails, `A1` is delivered and completed before `A2` is handed over), and an exclusive lock with colocated state (one receiver owns the session, and there is a place to stash metadata).
 
@@ -143,9 +132,9 @@ It does **not** give us ordering across a failure. The moment `A1` fails and we 
 
 So there is one ordering authority for failure paths: the hold-back we store in session state. The session's FIFO owns "serialize within a healthy stream." The hold-back owns "serialize across a failure gap." Neither replaces the other.
 
-That reframes what the session is actually buying us in this design. Its marginal value is not the failure-path ordering — we own that. It is that the exclusive lock makes the hold-back a **single-writer decision** instead of a distributed lease per `SessionId` that we would have to renew and recover on our own. I'd keep `RequiresSession` for the lock and the state co-location, and stop crediting it for failure-path ordering it does not provide.
+That reframes what the session is actually buying us in this design. Its marginal value is not the failure-path ordering — we own that. It is that the exclusive lock makes the hold-back a **single-writer decision** instead of a distributed lease per `SessionId` that we would have to renew and recover on our own. `RequiresSession` provides the lock and state co-location; the hold-back provides failure-path ordering.
 
-The practical consequence: because the hold-back *is* the ordering guarantee, its correctness *is* our ordering correctness. The broker will not catch a mistake here. I think we should test the hold-back as if there were no session underneath, because for the paths that matter, there effectively isn't.
+Because the hold-back is the failure-path ordering guarantee, its correctness is the ordering correctness. The broker does not validate that application rule.
 
 ## Session state
 
@@ -203,30 +192,30 @@ public async Task Handle(MyMessage message, IMessageHandlerContext context)
 }
 ```
 
-The abstraction reads the envelope, updates only the `user` section, and writes it back. Transport recoverability does the inverse: update only the `transport` section and preserve user state. This is sketched, not built — it's in the open-items list.
+The production abstraction must read the envelope, update only the `user` section, and write it back. Transport recoverability must update only the `transport` section and preserve user state. The spike models only transport state and is not an implementation of this public API; user-state preservation remains an open production item.
 
 ## Recoverability
 
-This is the section where the spike settled the core strategy, and it moved further than I expected. The restart boundary is narrower: the spike exercised graceful restart after a clean checkpoint, not every possible hard-kill or ambiguous broker outcome. I'm keeping my original framing and then updating it with what we learned.
+The core strategy is scheduled resend plus a peek-and-search hold-back. The restart assertion covers recovery after a clean checkpoint; hard-kill and ambiguous broker outcomes remain outside its scope.
 
 Core delayed retries are still a problem for sessions. When Core delayed retries are used today, the failed message is completed and a copy is scheduled for later. That means later messages in the same session can be processed before the failed message comes back. For ordered sessions, that is not OK. So for session-enabled endpoints, recoverability needs to be session-aware.
 
 ### What we decided: scheduled resend + peek-and-search hold-back
 
-On failure of a message `M` in session `S`, the current spike uses this order:
+On failure of a message `M` in session `S`, the implementation uses this order:
 
-1. Create a deterministic physical retry `MessageId` from the session, stable logical message identity, and retry attempt.
+1. Create a distinct physical retry `MessageId` from the session, stable logical message identity, and retry attempt. Determinism gives the attempt a stable identity and can suppress duplicate sends outside or around orchestration; it is not needed to repair a partial same-entity transaction.
 2. Schedule a fresh copy with the same `SessionId`, the new physical `MessageId`, the stable logical identity, and `ScheduledEnqueueTime = now + delay`.
 3. Persist session `S` as blocked (`LogicalMessageId`, `ExpectedRetryMessageId`, and `RetryAfter`).
 4. Complete the original. The scheduled copy is the retry.
 5. Release the session.
 
-The input queue has duplicate detection enabled. A retry cannot reuse the original broker `MessageId` because scheduled messages participate in duplicate detection and the broker could discard the retry as a duplicate. The physical identity is unique per intended attempt but deterministic for that attempt, so repeating an ambiguous schedule call within the duplicate-detection window does not create another scheduled copy. The stable logical identity is what an outbox or idempotent handler uses across physical attempts.
+The input queue has duplicate detection enabled. A retry must use a distinct physical broker `MessageId`; reusing the original would let duplicate detection discard the required scheduled retry as the original. Determinism is useful for stable attempt identity and for suppressing duplicate sends outside or around orchestration, but the same-entity transaction is all-or-none and does not rely on duplicate detection to repair a partial schedule/state/complete transition. The stable logical identity is what an outbox or idempotent handler uses across physical attempts.
 
-The hold-back checks `RetryAfter` before scanning, then peeks for `ExpectedRetryMessageId`:
+The hold-back checks `RetryAfter` after accepting a session. Scheduled messages can be peeked while scheduled, but cannot be received before their due time. This implementation intentionally waits until due before scanning for `ExpectedRetryMessageId`:
 
 ```text
-not due yet   -> cooldown until RetryAfter, release (no scan)
+not due yet   -> after acceptance, cooldown until RetryAfter, release (no scan)
 due, not found -> scan from the persisted frontier, persist the new frontier,
                   cooldown briefly, release
 found         -> receive forward past the backlog, leaving it LOCKED but unsettled,
@@ -236,20 +225,19 @@ after clear   -> the locked backlog re-flows on session close, in original order
 
 A deliberate choice: the hold-back **never abandons** the backlog prefix. Abandoning re-serves the same messages to the head, so a retry that fails again re-abandons the same prefix on every pass and inflates `DeliveryCount` until the backlog dead-letters without ever being processed. Instead we receive forward past the backlog and close the session with the messages unsettled — per ASB session semantics, closing a session with unsettled messages re-flows them **without** incrementing `DeliveryCount` (the increment only happens on lock *expiry* or explicit abandon). So a multi-retry failure re-runs the hold-back with zero delivery churn. Receiving forward (rather than one fixed-size batch) is also what lets the hold-back reach a retry buried deeper than a single batch — the abandoned-prefix approach could never get past the re-flowed head.
 
-The write order gives the intended at-least-once crash recovery. Each call boundary has a recovery story:
+The operation order is schedule → persist blocked session state → complete the original, and all three broker operations run inside one **same-entity Service Bus transaction**. The broker outcome is all-or-none:
 
-- **Scheduling fails before the broker accepts the copy:** the original remains unsettled. Its lock eventually expires, and the pump can receive it again.
-- **Scheduling succeeds but the call outcome is ambiguous:** the scheduled copy may exist even though the process cannot confirm that it does. The original is still unsettled and can be redelivered. Repeating the same logical attempt produces the same physical retry `MessageId`, so broker duplicate detection collapses the repeated schedule within its configured history window.
-- **Scheduling succeeds and state persistence fails:** the scheduled copy remains broker state, while the original can be redelivered. The redelivered original gives the pump another chance to schedule the deterministic retry and persist the block. If the state write actually succeeded but its response was lost, a restarted pump reads the block instead.
-- **State persistence succeeds but completing the original fails or has an ambiguous outcome:** the block and scheduled copy are durable. If the original lock expires, the original can also return. The blocked session prevents the backlog from reaching handlers until `ExpectedRetryMessageId` succeeds; logical-message idempotence handles the original/retry overlap.
-- **Completion succeeds:** the original is gone. The scheduled copy and blocked session state survive a restart, so the hold-back can find the retry and release the backlog after success.
-- **Session release fails or the process stops before release:** the broker eventually releases the session lock. Any unsettled messages become available again, while the durable scheduled copy and session state remain.
+- **Rollback:** the original remains available after its lock is released. No partial schedule/state/complete transition is exposed.
+- **Commit:** the scheduled copy, blocked state, and original completion become visible together.
+- **Ambiguous commit acknowledgement:** the process cannot know which outcome occurred, but the broker does not expose a partial transition. If orchestration repeats a schedule outside or around the transaction, a deterministic physical ID can let duplicate detection collapse it within its history window.
 
-This is the intended at-least-once behavior: preserve the original until a scheduled copy exists, persist the block before completing the original, and separate broker deduplication from logical-message idempotence. Duplicate detection only covers repeated physical sends within its history window; it does not replace an outbox or idempotent handler. The spike did not fault-inject every boundary or ambiguous broker outcome, so it proves the recovery model only after a clean checkpoint, not hard-kill safety.
+The transaction is limited to Service Bus operations. Azure Service Bus expires it two minutes after the first broker operation, SDK operations inside it are not retried automatically, and handler or database side effects remain outside the transaction. Those side effects still need idempotency or an outbox. Session release can still fail or the process can stop before release; the broker eventually releases the session lock and unsettled messages become available again, while the committed scheduled copy and session state remain.
+
+This is the intended at-least-once behavior: preserve the original until the transaction commits, separate broker deduplication from logical-message idempotence, and treat ambiguous acknowledgement as an unknown outcome rather than a partial one. The executable scenarios assert clean-checkpoint recovery; hard-kill safety and ambiguous broker outcomes remain open.
 
 ### Why scheduled resend, and not defer
 
-I originally leaned toward defer because it is the API that strictly preserves the backlog's order without re-enqueueing anything. The spike talked me out of it, and I want to show the reasoning because it is the load-bearing decision in this doc.
+Deferral is not a complete ordering strategy because it still requires a hold-back, and it has a difficult restart story.
 
 Defer is a nice storage primitive for the failed message during the delay, but "defer strictly preserves ordering" is not literally true, and treating it as true is the trap. Deferral *removes* the message from the session and sets it aside; the next receive hands you `A2`. Ordering of `A1` relative to the backlog is preserved not by defer but by our pump refusing to process `A2` until `A1` is recalled. So defer still needs the same hold-back. Given that, the comparison comes down to durability, and there defer loses hard.
 
@@ -258,13 +246,13 @@ The Azure SDK team confirms two facts (issues #16447 and #30252) that combine in
 - Deferred messages do **not** expire to the DLQ while deferred. They only reach the DLQ when someone *attempts to receive them* after expiry.
 - `AcceptNextSessionAsync` does not return a session whose only message has been deferred — ASB treats it as idle. So recall has to be driven by an in-memory registry plus `AcceptSessionAsync(sessionId)` by name.
 
-Put those together and the failure mode is: process restarts, the in-memory registry is gone, the deferred message sits in the broker with no TTL rescue and no DLQ path until somebody receives it. For a transport where "we do not lose messages" is the baseline posture, I think that is a production blocker. We saw exactly this in the spike — a single-message deferred session was never recalled until we added a by-name registry, and even then the registry dying on restart strands the message.
+Put those facts together and a process restart can leave the deferred message in the broker with no TTL rescue and no DLQ path until somebody receives it. A transport that requires durable recovery should not use deferral as its delayed-retry foundation.
 
-Scheduled resend removes the in-memory registry problem. The scheduled message is normal broker state and survives a restart without a registry. It still leaves ambiguous outcomes if the process stops while scheduling, persisting state, or settling the original; those outcomes can produce a redelivery or duplicate scheduled copy. The peek-and-search hold-back it needs is something we have to build **anyway**, because ServiceControl retries arrive as normal messages behind the backlog — there is no "recall by sequence number" path for an external retry.
+Scheduled resend removes the in-memory registry problem. The scheduled message is normal broker state and survives a restart without a registry. The schedule, state write, and completion are one same-entity transaction, so an ambiguous acknowledgement leaves the process unsure whether the all-or-none transition committed, not with a partially committed transition. The peek-and-search hold-back it needs is something we have to build **anyway**, because ServiceControl retries arrive as normal messages behind the backlog — there is no "recall by sequence number" path for an external retry.
 
 So scheduled resend is the core. The retried message gets a fresh physical `MessageId`, sequence number, enqueue time, and `DeliveryCount`, and it costs one extra send per retry. The stable logical identity and durable `RetryCount` travel as application properties instead of relying on broker identity or delivery count.
 
-The hold-back persists `LastPeekedSequenceNumber`, not the value returned by `ScheduleMessageAsync`. A duplicate schedule request may be accepted and discarded by duplicate detection, so its returned sequence number cannot safely describe the retained retry. Starting from the head and persisting only sequence numbers actually observed by peek avoids that ambiguity. When the retry is due but not yet enqueued, the scan records how far it got. The next pass, including one after restart, resumes after that frontier. This is safe because Azure Service Bus assigns the retry's final sequence number when it enters the queue.
+The hold-back persists `LastPeekedSequenceNumber`, not the value returned by `ScheduleMessageAsync`. A duplicate schedule request may be accepted and discarded by duplicate detection, so its returned sequence number cannot safely describe the retained retry. Starting from the head and persisting only active sequence numbers actually observed by peek avoids that ambiguity. A scheduled message may be peeked while scheduled, but activation appends it with a new final sequence number; the persisted active frontier therefore cannot skip the activated retry. The next pass, including one after restart, resumes after that frontier.
 
 ### Where hold-and-sleep still fits
 
@@ -274,9 +262,9 @@ For short delays — I'd say up to about two or three seconds — holding the se
 - longer, in-process: scheduled resend + peek-and-search hold-back
 - cross-process / long delay / external: ServiceControl retry, which is just another normal-message resend under the same hold-back
 
-### Why we rejected re-enqueue-all
+### Why re-enqueue-all is not the primary path
 
-We also explored "re-enqueue every backlog message we see until the delayed `A1` arrives." I want to record why we said no, so it does not come back. It only preserves order in a drained, quiescent session: against a concurrent producer still sending `A5`, `A6`, we race the producer and can never win. It is also `O(backlog)` mutation to recreate an ordering property the hold-back gives for free by not moving anything. Keep it only as a recovery escape hatch on quiescent sessions, not as the primary path.
+Re-enqueueing every observed backlog message only preserves order in a drained, quiescent session. A concurrent producer can continue adding messages, and the operation is `O(backlog)` mutation to recreate an ordering property the hold-back provides without moving messages. It is an operational escape hatch for a quiescent session, not the primary path.
 
 ## What needs to change in the code
 
@@ -357,45 +345,41 @@ It needs to:
 - settle source messages safely
 - integrate with critical errors and diagnostics
 
-The receive-send-complete sequence uses cross-entity transactions. The spike confirms the wiring works: receive from a session-enabled subscription in peek-lock, open a transaction scope, complete the source and send the copy in the same transaction, preserve `SessionId`, and rollback behaves correctly when either side fails. For partitioned/session entities, `SessionId` acts as the partition key, so the forwarded message must use a compatible `SessionId`/partition key.
+The receive-send-complete sequence uses cross-entity transactions: receive from a session-enabled subscription in peek-lock, open a transaction scope, send the copy and complete the source in the same transaction, and preserve `SessionId`. The executable scenarios do not inject bridge rollback, so rollback behavior remains an explicit fault-injection item. For partitioned/session entities, `SessionId` acts as the partition key, so the forwarded message must use a compatible `SessionId`/partition key.
 
-## What the spike proved
+## What the executable scenarios assert
 
-The results below came from live-namespace runs before the physical/logical identity split. The revised spike builds and now enables duplicate detection, derives retry attempts from durable metadata, and fails closed on unreadable session state. It still needs a live rerun of the normal, stretch, and restart scenarios. The code is in `Program.cs` / `Prepare.cs` in this project.
+The executable scenarios cover normal processing, a backlog deeper than one peek page, two competing pumps, and restart with a fresh in-memory cooldown map. They enable duplicate detection, derive retry attempts from durable metadata, fail closed on unreadable session state, and record a successful handler completion only after message settlement or transaction disposal. The observer records session ID, logical ID, physical ID, and attempt, then uses bounded polling and a short quiescence check.
 
-- **The bridge wires correctly.** Cross-entity transactional forwarding from two independent session-enabled subscriptions into one shared session-enabled input queue. No duplicates, no leaks.
-- **Multiple ordered subscriptions into one input queue preserve per-session order.** Each subscription keeps its own per-session order; cross-subscription order is correctly not claimed.
-- **Scheduled-resend delayed retries preserve order under a concurrent producer.** With `Customer-123`, `msg2` failed and was scheduled for a +6s resend while a concurrent publisher kept feeding `msg5/6/7` into the same session. Completion order came out `msg1 -> msg2 -> msg3 -> msg5 -> msg6 -> msg7`. The hold-back held the backlog prefix (locked, unsettled) until the scheduled `msg2` arrived, then re-flowed it on session close. That is the falsifiable test, and it held.
-- **Multi-retry works.** A message that needed two scheduled retries completed on the third attempt; the hold-back held across both delays. This is the case defer stranded, and scheduled resend handled it natively.
-- **Graceful restart recovers from durable state.** We tore down the pump and client while a block was in flight, sat with no pump past the retry delay (wiping the in-memory cooldown), and started a fresh pump on a new client. It reconstructed everything from session state + the scheduled broker message, and order still held. This proves recovery after a clean checkpoint, not behavior at every hard-kill or ambiguous broker-outcome boundary.
+- Normal and competing scenarios assert exactly-once completion for the listed scenario messages in per-session order. They require Customer-123 attempt 2 before `msg3` and concurrent messages, and Customer-789 success on attempt 3.
+- Stretch asserts Customer-123 attempt 2 before all 40 held backlog messages and the remaining Customer-123 messages.
+- Restart asserts that a fresh pump clears the durable block and completes Customer-123 as `msg1`, `msg2` attempt 2, `msg3`, alongside the expected fixed messages in their own sessions.
+- Terminal mode drives one message through `MaxAttempts` into the DLQ, keeps later same-session messages held, then asserts the deterministic manual physical ID, preserved durable retry/manual counters, successful manual completion, exact per-session order, and no duplicate completion records. The simulator distinguishes the first manual recovery cycle from durable message metadata rather than a process-local transport switch.
+- The observer's claims are limited to the asserted scenario messages. It is scenario instrumentation, not transport correctness; no global order is asserted across sessions, subscriptions, or topics.
 
-The one result worth flagging as a failure, because it is what localized the hardest bug: an earlier version of the spike cleared the block unconditionally on a ServiceControl-style resend, and `msg3` (Shipping) completed before `msg2` (Payment). Everything was durable; the logic was wrong. That run is the reason I keep saying the hold-back *is* the ordering guarantee.
+The normal, stretch, competing, restart, and terminal modes pass these executable assertions. They do not inject bridge rollback, hard kills, or ambiguous broker acknowledgements, so those behaviors remain open.
 
-## What the spike resolved, and what is still open
+## What remains open
 
-The original list of things to spike, with outcomes:
-
-- **Bridge transaction wiring — RESOLVED.** Cross-entity transactions work with session processors; rollback behaves.
-- **Least-bad blocked-session strategy — RESOLVED for the tested path.** Scheduled resend + peek-and-search hold-back. Defer rejected (restart strands messages); re-enqueue-all rejected (can't beat a concurrent producer); hold-and-sleep kept for short delays. Hard-kill and ambiguous broker outcomes still need fault-injection tests.
-- **How a retried message unblocks a session — RESOLVED.** The hold-back stores the stable logical identity for idempotence and the expected physical retry `MessageId` for broker lookup. Each intended retry attempt has a deterministic physical identity, so duplicate detection can collapse a repeated schedule call without discarding the retry as a duplicate of the original. `SequenceNumber` is neither identity nor a persisted lower bound; the scan persists only sequence numbers it has actually peeked.
+- **Least-bad blocked-session strategy for the asserted path.** Scheduled resend plus peek-and-search hold-back is the implemented strategy. Deferral has a difficult restart story; re-enqueue-all cannot reliably beat a concurrent producer; hold-and-sleep remains useful for short delays. Hard-kill and ambiguous broker outcomes still need fault-injection tests.
+- **Retry identity and frontier.** The hold-back stores the stable logical identity for idempotence and the expected physical retry `MessageId` for broker lookup. Each intended retry attempt has a distinct physical identity so duplicate detection does not discard the retry as a duplicate of the original. Determinism is useful for stable attempt identity and duplicate suppression outside or around orchestration; the same-entity transaction is all-or-none and does not rely on duplicate detection to repair a partial schedule/state/complete transition. `SequenceNumber` is neither identity nor a persisted lower bound; the scan persists only active sequence numbers it has actually peeked.
 - **Migration story — OPEN.** `RequiresSession` cannot be flipped on an existing entity. Fail fast, manual migration, a helper, or new entity names — still a decision.
 - **Mixed ordered/unordered messages — DECIDED, start with no.** With Core 10.2 supporting multiple endpoints in one process and the newer throughput-based licensing, hosting two endpoints (one session-enabled, one regular) is a cleaner escape hatch than complicating the transport.
 - **Session-enabled subscriptions on non-session endpoints — DECIDED, start with no.** We could bridge into a normal queue, but then we only preserve order until the bridge and the guarantee becomes subtle and dangerous.
 
 Still-open implementation and posture items:
 
-- **Live rerun with duplicate detection.** Run the normal, stretch, and graceful-restart scenarios against the revised queue. The scheduled retry must survive because its physical `MessageId` differs from the original, while repeated scheduling of the same attempt must collapse inside the duplicate-detection window.
-- **Hard-kill and ambiguous-outcome restart variant.** The clean-checkpoint restart is proven. The spike does not prove behavior when a process stops during `ScheduleMessageAsync`, session-state persistence, or completion, or when one of those calls returns an ambiguous broker outcome. The intended at-least-once behavior is: before scheduling succeeds, the unsettled original becomes available again; after scheduling succeeds, the scheduled copy survives in broker state; after state persistence, a restarted pump can re-establish the hold-back; after completion, any original/retry overlap must be harmless at the logical-message level. Fault injection is still needed to verify these cases and the limits of the duplicate-detection window.
-- **Bridge back-pressure escape valve.** On persistent send failure (N attempts or quota exception), the bridge currently just stops draining and pressure propagates to the topic. ASB's `ForwardTo` dead-letters at the source to protect the topic; I think our bridge should too.
+- **Hard-kill and ambiguous-outcome restart variant.** The executable restart assertion covers a clean checkpoint. Client recovery when a process stops during the same-entity transaction or when its commit acknowledgement is ambiguous remains open. Fault injection is needed for client recovery and handler/database side effects outside the transaction, not to test a partial broker schedule/state/complete transition: the broker should expose either the rolled-back original or the committed scheduled copy, blocked state, and completion. A process restart still cannot infer which outcome occurred from an ambiguous acknowledgement, and the duplicate-detection window still needs testing.
+- **Bridge back-pressure escape valve.** During destination failure, the processor can hold a bounded active source delivery; repeated failures and redeliveries can consume delivery attempts and eventually dead-letter the source message. No deliberate production escape or critical-error policy exists yet. ASB's `ForwardTo` dead-letters at the source to protect the topic; the bridge needs an explicit policy.
 - **TTL interaction with the hold-back.** For session-enabled entities, if any message's TTL expires, ASB drops or dead-letters **all** messages in the session. A delayed-retry loop that holds `A2…A4` while `A1` is pending is a slow path to that trigger — one expiring message takes the whole session down. Hold-back duration and per-message TTL need to be budgeted together.
 - **`MaxDeliveryCount` semantics.** The hold-back no longer abandons the backlog (it re-flows via session close without incrementing `DeliveryCount`), so the broker's `MaxDeliveryCount` is not burned by hold-back churn. It still matters for immediate abandon-retries and lock expiry. Delayed attempts are read from the durable `RetryCount` application property, not an in-memory counter.
-- **ServiceControl bring-back: shared mechanism, distinct semantics.** A bring-back needs a new physical broker identity and the same stable logical identity. If terminal failure leaves the session blocked, the control path must update `ExpectedRetryMessageId` before the hold-back can find that physical message. The substantive point is ordering *after* terminal escalation: today the spike DLQs the message **and clears the block**, so the backlog drains immediately, and a later ServiceControl retry lands on an unblocked session and can process ahead of already-drained backlog. That is an order violation by construction, not by bug. I think it is a defensible posture (a message pushed to the error queue has left the ordered stream; a retry is an operational intervention, not part of the ordered contract), but it is a stance to take deliberately, not stumble into.
-- **Session unblock strategy on terminal failure — open design dimension.** "Clear and flow" is not the only posture. We could *hold until manual unblock* (strict ordering, lower availability) or *hold with a bounded timeout* (a compromise). The mechanism already exists — the block is just session state — so what is missing is the policy toggle and, I think, a **control message** path: a well-known message the pump recognizes as "unblock this session," so operators do not have to touch ASB session state directly. A control message is also the natural way to *re-block* if a ServiceControl retry should land strictly in order behind a re-established hold. I'd want to design this before we lock the recoverability posture.
-- **Session state `user` section + `IAzureServiceBusSessionState` API.** Sketched above, not built.
+- **ServiceControl bring-back: same strict hold-back, distinct identity.** A bring-back receives a new physical broker identity and preserves the same stable logical identity. Terminal failure releases the session lock and receiver but, in the same-entity transaction, keeps the session durably blocked while recording the exact deterministic manual `ExpectedRetryMessageId` and durable manual-retry counter. The unsettled backlog becomes available in its existing order; a later receiver reads the block and keeps it from the handler. The DLQ processor preserves message metadata and counters, then uses a cross-entity transaction to send that physical identity to the input queue and complete the DLQ message. The hold-back selects it by physical identity before releasing the older backlog to the handler; its new `SequenceNumber` and queue position are irrelevant.
+- **Operator discard/unblock limitation.** Automated or manual retry exhaustion fails closed: the DLQ evidence and blocked session remain until an explicit discard/unblock action. That action intentionally skips the failed message, after which the remainder retains relative session order. This spike does not implement the full operator control path; that is an operational limitation, not an undecided ordering policy.
+- **Session state `user` section + `IAzureServiceBusSessionState` API.** The production envelope must preserve user-owned state. This spike intentionally models only transport state and is not an implementation of that public API.
 
 ## Assumptions I do not want us to gloss over
 
-I think the direction fits the Service Bus constraints, but only if we are honest about the edges.
+The direction fits the Service Bus constraints only if these edges remain explicit.
 
 What seems solid:
 
@@ -403,16 +387,16 @@ What seems solid:
 - `RequiresSession` is decided when the entity is created, so we need validation or a migration story for existing queues and subscriptions
 - the input queue is the right place to centralize handler execution, recoverability, blocked-session state, and ServiceControl retry behavior
 - Core delayed retries are not compatible with strict session ordering because they complete the failed message and schedule a copy — so we replace them with transport-owned scheduled resend
-- moving a failed message to the error queue loses broker ordering unless we mark the session as blocked
+- moving a failed message to the error queue requires preserving the session block and expected manual physical identity so the same hold-back can order its bring-back
 - the hold-back matches the expected physical retry identity and is what preserves order across a failure
 - unreadable or unsupported session state fails closed instead of being treated as an unblocked session
 - delayed retry attempts come from durable message metadata rather than process memory
 
 What still needs care:
 
-- The retry transition is intentionally schedule → persist blocked session state → complete the original. At-least-once recovery relies on the original remaining unsettled until scheduling succeeds, the scheduled copy surviving once scheduling succeeds, and the persisted block holding later messages once state persistence succeeds. Broker duplicate detection handles repeated sends of one deterministic physical attempt inside its history window; logical-message idempotence handles original/retry overlap. The spike has not fault-injected those boundaries.
+- The retry transition is intentionally schedule → persist blocked session state → complete the original inside one same-entity Service Bus transaction. A rollback leaves the original available; a commit exposes the scheduled copy, blocked state, and completion together. An ambiguous acknowledgement leaves the outcome unknown to the process, not partially committed at the broker. Broker duplicate detection can suppress repeated sends of one deterministic physical attempt outside or around orchestration; logical-message idempotence handles handler or database side effects outside the transaction. The executable scenarios do not fault-inject those boundaries.
 - The bridge preserves the order it receives from one session-enabled subscription, but it cannot create a global order across independent sources. That is fine because raw Service Bus sessions do not provide it either.
-- The bridge is only boring if receive-send-complete is atomic. The spike says it is, but we should keep the duplicate/loss cases in mind for the real transport's diagnostics.
+- The bridge requires receive-send-complete to be atomic. Rollback and duplicate/loss cases need explicit fault-injection coverage before production claims are made.
 - For partitioned entities, `SessionId` is also the partition key. Any `PartitionKey` or `TransactionPartitionKey` we set must be compatible with it.
 - Session state persists after all messages in the session are consumed, counts against the entity quota, and needs cleanup. The size limit also depends on the tier.
 - A session-enabled endpoint cannot receive messages without `SessionId`. We should fail fast before sending or publishing such messages into a session-enabled path.
@@ -421,7 +405,7 @@ What still needs care:
 
 So the promise stays narrow:
 
-> We preserve ordered endpoint processing per session at the session-enabled input queue boundary. Ordered subscriptions are bridged into that boundary. We do not claim global ordering across independent sources because Azure Service Bus sessions do not provide that either. The spike proves bridge atomicity, the scheduled-resend hold-back, and graceful restart after a clean checkpoint. The remaining unknowns are hard-kill and ambiguous broker outcomes, the back-pressure valve, and the unblock-strategy posture.
+> We preserve ordered endpoint processing per session at the session-enabled input queue boundary. Ordered subscriptions are bridged into that boundary. We do not claim global ordering across independent sources because Azure Service Bus sessions do not provide that either. The executable scenarios assert the scheduled-resend hold-back and graceful restart after a clean checkpoint for listed messages. The remaining unknowns are bridge rollback, hard-kill and ambiguous broker outcomes, the back-pressure valve, and the unblock-strategy posture.
 
 ## Suggested decision
 
@@ -434,20 +418,16 @@ Use the session-enabled input queue as the central design point:
 - use ASB session state for transport blocking metadata, versioned envelope, transport/user split
 - allow users to use session state through the safe envelope-based abstraction
 
-This is still a sizeable change. I do not think we should present it as a small adjustment to topology creation. But the spike makes me more confident it gives us a model that is easier to explain and much closer to how NServiceBus endpoints are expected to behave.
+This is a sizeable change rather than a small topology-creation adjustment. It keeps the model close to the endpoint boundary expected by NServiceBus while preserving a narrow per-session guarantee.
 
 ## Proposed next step
 
-The original next step was a spike of a vertical slice. Most of that slice is now done: sessions on, session-enabled input queue, session processor consumption, `SessionId` on outgoing messages, one ordered subscription without `ForwardTo`, bridged in with `SessionId` preserved, ordered event handling, blocked-session metadata after a failure, and another session continuing while a failed session is blocked.
-
-So I think the next step is the transport-facing work and the two posture decisions:
+The remaining work is transport-facing implementation and two posture decisions:
 
 1. The **unblock strategy** (clear-and-flow vs hold-until-manual vs hold-with-timeout, plus the control message). This changes what users observe, so I'd want it decided before we lock the recoverability contract.
 2. The **migration story** for existing entities, since `RequiresSession` is creation-time only.
 
-After those, rerun the revised spike against a live namespace. The remaining implementation gaps are the bridge back-pressure valve, TTL/hold-back budgeting, hard-kill and ambiguous-outcome fault injection (including duplicate-detection-window expiry), and the `IAzureServiceBusSessionState` abstraction.
-
-I'm quite aware this doc is long and that the spike is a spike, not done done. Happy to tighten any of it, and please don't hesitate to challenge the scheduled-resend decision or the unblock-strategy framing — those are the two places I'd most want a second opinion.
+The remaining implementation gaps are the bridge back-pressure valve, TTL/hold-back budgeting, hard-kill and ambiguous-outcome fault injection (including duplicate-detection-window expiry), and the `IAzureServiceBusSessionState` abstraction.
 
 ## References
 
@@ -456,5 +436,6 @@ I'm quite aware this doc is long and that the spike is a spike, not done done. H
 - MS Learn, message-sessions — abandoning re-serves the same message; `MaxDeliveryCount` semantics; TTL drops or dead-letters the whole session on session-enabled entities.
 - MS Learn, duplicate detection — scheduled messages participate in duplicate detection; the history window controls how long repeated physical sends are discarded.
 - MS Learn, auto-forwarding — "Service Bus bills one operation for each forwarded message"; autoforwarding is not supported for session-enabled entities; destination-quota failure dead-letters at the source.
+- MS Learn, [message sequencing and timestamps](https://learn.microsoft.com/azure/service-bus-messaging/message-sequencing) — a scheduled message's sequence number is valid only while it is scheduled; activation appends the message with a new sequence number.
 - MS pricing FAQ — operations metering: each API interaction (send/receive/complete/renew-lock/session-state) counts, in 64 KB message granularity.
 - Spike code: `Program.cs`, `Prepare.cs` in this project.
