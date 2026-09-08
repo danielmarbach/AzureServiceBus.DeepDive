@@ -4,6 +4,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.RateLimiting;
@@ -26,33 +27,12 @@ namespace SubscriptionBridge;
 //             -> input queue session pump (manual AcceptNextSessionAsync)
 //               -> simulated handler
 //
-// Recoverability is the part that needed the most thinking, and where this spike
-// landed on scheduled resend plus a peek-and-search hold-back.
+// Recoverability uses scheduled resend plus a session-state hold-back. Each retry
+// keeps its logical identity but gets a deterministic physical MessageId.
 //
-// When a message fails, the pump:
-//   1. Marks the session BLOCKED in ASB session state (BlockedMessageId = the
-//      failed message's MessageId, RetryAfter = now + delay).
-//   2. Schedules a fresh copy with the SAME SessionId + MessageId and
-//      ScheduledEnqueueTime = now + delay.
-//   3. Completes the original — the scheduled copy is the retry.
-//   4. Releases the session.
-//
-// The hold-back (peek-and-search), on every accept of a blocked session:
-//   - Peek a window and search for BlockedMessageId.
-//   - Not found (retry not visible yet): cooldown until RetryAfter, release.
-//   - Found: receive up to it, abandon the backlog prefix, process ONLY the match,
-//     clear the block on success. The abandoned backlog re-flows in order.
-//
-// Why scheduled resend rather than defer? Defer looks cleaner on paper, but a
-// deferred message only survives a process restart if we rebuild a registry by
-// peeking the whole queue (deferred messages don't expire to the DLQ, and
-// AcceptNextSessionAsync won't surface a deferred-only session). Scheduled messages
-// are just normal broker state, so they survive restart for free and we don't need
-// a registry to recover them. On top of that, the peek-and-search hold-back is
-// something we need anyway for ServiceControl retries, which arrive as normal
-// messages behind the backlog. The honest trade-off: a scheduled copy gets a fresh
-// sequence number, fresh enqueue time, and reset DeliveryCount, so we carry the
-// attempt count ourselves as a RetryCount application property.
+// On failure the pump schedules the retry, persists the expected physical identity,
+// completes the original, and releases the session. The hold-back processes only
+// that expected retry before allowing the unsettled backlog to re-flow.
 internal class Program
 {
     static readonly string ConnectionString =
@@ -79,11 +59,10 @@ internal class Program
     // --- Delayed-retry configuration (scheduled resend) ---
     static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(6);
     const int MaxAttempts = 5;
+    const string LogicalMessageIdProperty = "Spike.LogicalMessageId";
+    const string RetryCountProperty = "Spike.RetryCount";
+    const string ManualRetryCountProperty = "Spike.ManualRetryCount";
 
-    // Simulated failure budget per MessageId: fail the first N attempts, then
-    // succeed. Because the scheduled retry keeps the same MessageId, the budget
-    // spans the original and its retries naturally.
-    static readonly ConcurrentDictionary<string, int> FailureAttempts = new();
     static readonly Dictionary<string, int> FailureBudget = new()
     {
         ["cust123-msg2"] = 1,   // fails attempt 1, succeeds on the scheduled retry
@@ -394,12 +373,8 @@ internal class Program
 
     // Processes a single session, two paths:
     //
-    // BLOCKED: the session is pinned to BlockedMessageId by a prior failure. We peek
-    // for that MessageId. If the scheduled retry hasn't turned up yet, cooldown and
-    // release. If it has, we receive forward past the backlog (leaving it locked,
-    // never abandoning it), process ONLY the match, and clear the block on success.
-    // The locked backlog re-flows on session close — without burning DeliveryCount —
-    // and is processed in original order on the next accept.
+    // BLOCKED: the session is pinned to ExpectedRetryMessageId. The pump processes
+    // only that physical retry before allowing the unsettled backlog to re-flow.
     //
     // CLEAR: ordinary FIFO receive and process.
     static async Task ProcessSessionAsync(ServiceBusSessionReceiver receiver, ServiceBusSender inputQueueSender, string sessionId, int workerId, CancellationToken ct)
@@ -436,27 +411,13 @@ internal class Program
         await ReleaseSessionAsync(receiver, sessionId, workerId);
     }
 
-    // Hold-back for a blocked session. Scan the session for BlockedMessageId by
-    // advancing a peek frontier, so we skip backlog we've already ruled out instead
-    // of re-walking the head on every peek:
-    //   - Not found by the end of the session → retry not visible yet → cooldown, release.
-    //   - Found → receive forward past the locked backlog, process the match, clear block.
-    //
-    // The scan starts from the stored ScheduledSequenceNumber when present — a safe lower
-    // bound on the retry's position (ASB sequences scheduled messages at enqueue time, so
-    // the retry always lands at or after the stored seq) — and from the head otherwise.
-    // The retry gets a fresh, higher sequence number when it's eventually enqueued (after
-    // the delay), so paging forward from the stored seq is what lets us actually find it
-    // when the backlog grows past a single peek window.
+    // The persisted peek frontier skips backlog already ruled out. Physical retry
+    // identity remains unambiguous even when logical identities repeat.
     static async Task ProcessBlockedSessionAsync(ServiceBusSessionReceiver receiver, ServiceBusSender inputQueueSender, string sessionId, SessionState sessionState, int workerId, CancellationToken ct)
     {
-        WriteLine($"[PUMP-{workerId}] Session '{sessionId}' BLOCKED on '{sessionState.BlockedMessageId}'. Locating scheduled retry...");
+        WriteLine($"[PUMP-{workerId}] Session '{sessionId}' BLOCKED on logical '{sessionState.LogicalMessageId}', waiting for '{sessionState.ExpectedRetryMessageId}'.");
 
-        // The retry is scheduled for RetryAfter — it cannot be visible before then, so
-        // there is no point peeking or scanning for it. Cooldown until RetryAfter and
-        // release; the next accept after the delay scans for it (starting from the stored
-        // seq). This is what keeps the hold-back from re-walking a large backlog on every
-        // accept while the retry is still in the future.
+        // The retry cannot be visible before RetryAfter, so scanning earlier only spins.
         if (sessionState.RetryAfter is DateTimeOffset retryAfter && retryAfter > DateTimeOffset.UtcNow)
         {
             BlockedSessionCooldown[sessionId] = retryAfter.UtcDateTime;
@@ -466,28 +427,14 @@ internal class Program
             return;
         }
 
-        // Locate the retry by MessageId. The stored seq (from ScheduleMessageAsync) is a
-        // LOWER BOUND on the retry's position, not its address: ASB assigns a scheduled
-        // message's sequence number at enqueue time, not schedule time, so the retry lands
-        // at or after the stored seq (verified against a live namespace — the returned seq
-        // was 1, the message was enqueued at 5). Starting the scan there skips the
-        // already-ruled-out backlog instead of re-walking the head. When the seq is missing
-        // (crash between schedule and state write) or the retry is external (ServiceControl
-        // bring-back), the scan starts from the head and pages forward.
-        //
-        // The scan's frontier (LastPeekedSequenceNumber) is persisted in session state so
-        // a scan that runs off the end without finding the retry (broker lag, or the client
-        // clock running ahead of the broker) resumes from where it left off instead of
-        // re-walking the backlog — and a restarted pump picks up the same frontier. This is
-        // safe because the frontier is only advanced while the retry is NOT enqueued, and a
-        // message's seq is assigned at enqueue time, so everything the scan has ruled out
-        // is strictly below the retry's eventual seq.
+        // A scheduled message receives its final sequence number when it is enqueued.
+        // A frontier persisted before that point is therefore safe to resume after.
         long? matchSeq = null;
         long? lastPeeked = null;
         {
-            long? fromSeq = sessionState.ScheduledSequenceNumber;
-            if (sessionState.LastPeekedSequenceNumber is long lp && lp > fromSeq)
-                fromSeq = lp;
+            long? fromSeq = sessionState.LastPeekedSequenceNumber is long frontier
+                ? frontier + 1
+                : null;
             const int peekBatch = 32;
             while (!ct.IsCancellationRequested)
             {
@@ -498,7 +445,7 @@ internal class Program
                 lastPeeked = peeked.Max(m => m.SequenceNumber);
 
                 var match = peeked.FirstOrDefault(m =>
-                    string.Equals(m.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal));
+                    string.Equals(m.MessageId, sessionState.ExpectedRetryMessageId, StringComparison.Ordinal));
                 if (match != null)
                 {
                     matchSeq = match.SequenceNumber;
@@ -517,11 +464,7 @@ internal class Program
 
         if (matchSeq == null)
         {
-            // The retry is due (RetryAfter passed) but not visible — broker lag, or the
-            // stored seq is missing/stale (crash between schedule and state write). The
-            // scan already walked the session and found nothing. Persist the frontier so
-            // the next scan (and a restarted pump) resumes from here instead of re-walking
-            // the backlog, then cooldown briefly so we don't hot-spin.
+            // Persist the exhausted scan so the next accept resumes after this frontier.
             if (lastPeeked is long lp && lp > (sessionState.LastPeekedSequenceNumber ?? 0))
             {
                 var updated = sessionState with { LastPeekedSequenceNumber = lp };
@@ -558,7 +501,7 @@ internal class Program
                 break; // session exhausted; the retry we peeked is gone — edge race
 
             retryMessage = batch.FirstOrDefault(m =>
-                string.Equals(m.MessageId, sessionState.BlockedMessageId, StringComparison.Ordinal));
+                string.Equals(m.MessageId, sessionState.ExpectedRetryMessageId, StringComparison.Ordinal));
             if (retryMessage != null)
                 break;
         }
@@ -594,110 +537,101 @@ internal class Program
 
     static async Task<SessionState> ReadSessionStateAsync(ServiceBusSessionReceiver receiver, CancellationToken ct)
     {
-        try
-        {
-            var binaryState = await receiver.GetSessionStateAsync(ct);
-            if (binaryState == null) return SessionState.Default;
-
-            var json = Encoding.UTF8.GetString(binaryState);
-            return SessionState.FromJson(json);
-        }
-        catch (Exception ex)
-        {
-            WriteLine($"[PUMP] Warning reading session state: {ex.Message}");
-            return SessionState.Default;
-        }
+        var binaryState = await receiver.GetSessionStateAsync(ct);
+        return binaryState == null
+            ? SessionState.Default
+            : SessionState.FromJson(Encoding.UTF8.GetString(binaryState));
     }
 
-    // Marks the session blocked in ASB session state, which is what makes it durable.
-    // We also store the sequence number returned by ScheduleMessageAsync. Note this is a
-    // LOWER BOUND on the retry's position, not its address — ASB sequences scheduled
-    // messages at enqueue time, so the stored seq is always behind the retry's actual
-    // seq. The hold-back uses it as the scan's starting point, which skips the backlog
-    // instead of re-walking the head. When the seq is missing (crash between schedule
-    // and state write) or the retry is external, the scan starts from the head.
-    static async Task MarkSessionBlockedAsync(ServiceBusSessionReceiver receiver, string sessionId, string failedMessageId, long scheduledSequenceNumber, int workerId)
+    static async Task MarkSessionBlockedAsync(ServiceBusSessionReceiver receiver, string sessionId, string logicalMessageId, string expectedRetryMessageId, DateTimeOffset retryAfter, int workerId)
     {
-        var retryAfter = DateTimeOffset.UtcNow + RetryDelay;
         var state = new SessionState
         {
             IsBlocked = true,
-            BlockedMessageId = failedMessageId,
+            LogicalMessageId = logicalMessageId,
+            ExpectedRetryMessageId = expectedRetryMessageId,
             BlockedAt = DateTimeOffset.UtcNow,
-            RetryAfter = retryAfter,
-            ScheduledSequenceNumber = scheduledSequenceNumber
+            RetryAfter = retryAfter
         };
 
         await receiver.SetSessionStateAsync(BinaryData.FromBytes(Encoding.UTF8.GetBytes(state.ToJson())));
-        WriteLine($"[PUMP-{workerId}] Session state: '{sessionId}' = BLOCKED (msg: {failedMessageId}, retry in {(int)RetryDelay.TotalSeconds}s)");
+        WriteLine($"[PUMP-{workerId}] Session state: '{sessionId}' = BLOCKED (logical: {logicalMessageId}, expected: {expectedRetryMessageId})");
     }
 
-    // Handle a single message. On success we complete and return true. On failure we
-    // schedule a delayed resend (same SessionId + MessageId), complete the original,
-    // mark the session blocked, and return false. On terminal failure — attempts
-    // exhausted — we dead-letter and clear the block.
     static async Task<bool> TryHandleAsync(ServiceBusSessionReceiver receiver, ServiceBusSender inputQueueSender, ServiceBusReceivedMessage message, string sessionId, int workerId, CancellationToken ct)
     {
+        var logicalMessageId = GetLogicalMessageId(message);
+        var attempt = GetCount(message, RetryCountProperty) + 1;
         var body = Encoding.UTF8.GetString(message.Body);
-        WriteLine($"[PUMP-{workerId}]   Processing '{message.MessageId}' (session '{sessionId}'): {body}");
-
-        var attempts = FailureAttempts.AddOrUpdate(message.MessageId, 1, (_, c) => c + 1);
+        WriteLine($"[PUMP-{workerId}]   Processing logical '{logicalMessageId}' via '{message.MessageId}' (attempt {attempt}, session '{sessionId}'): {body}");
 
         try
         {
-            if (FailureBudget.TryGetValue(message.MessageId, out var budget) && attempts <= budget)
-            {
-                throw new InvalidOperationException($"Simulated failure #{attempts} for '{message.MessageId}'");
-            }
+            if (FailureBudget.TryGetValue(logicalMessageId, out var budget) && attempt <= budget)
+                throw new InvalidOperationException($"Simulated failure #{attempt} for '{logicalMessageId}'");
 
             await receiver.CompleteMessageAsync(message, ct);
-            WriteLine($"[PUMP-{workerId}]   Completed '{message.MessageId}'");
+            WriteLine($"[PUMP-{workerId}]   Completed logical '{logicalMessageId}' via '{message.MessageId}'");
             return true;
         }
         catch (Exception ex)
         {
-            WriteLine($"[PUMP-{workerId}]   FAILED '{message.MessageId}': {ex.Message}");
+            WriteLine($"[PUMP-{workerId}]   FAILED logical '{logicalMessageId}' via '{message.MessageId}': {ex.Message}");
 
-            if (attempts >= MaxAttempts)
+            if (attempt >= MaxAttempts)
             {
-                // Terminal failure: dead-letter and clear the block so the backlog can
-                // flow. This is the "clear and flow" posture — a deliberate choice for
-                // the spike, not the only one. "Hold until manual unblock" or "hold with
-                // a timeout" are also valid; see the topology doc.
                 await receiver.DeadLetterMessageAsync(message, deadLetterReason: "MaxRetriesExceeded", deadLetterErrorDescription: ex.Message, cancellationToken: ct);
                 await ClearSessionBlockedStateAsync(receiver, sessionId, workerId);
-                WriteLine($"[PUMP-{workerId}]   Terminal failure '{message.MessageId}' -> DLQ (attempt {attempts} >= {MaxAttempts}). Backlog may now flow.");
+                WriteLine($"[PUMP-{workerId}]   Terminal failure '{logicalMessageId}' -> DLQ (attempt {attempt} >= {MaxAttempts}). Backlog may now flow.");
                 return false;
             }
 
-            // Schedule a delayed resend with the same SessionId and MessageId, so the
-            // hold-back can find it. ScheduleMessageAsync hands us back the sequence
-            // number, which we persist in session state so the next accept can address
-            // the retry directly instead of scanning the backlog. The scheduled message
-            // is ordinary broker state — it survives restart, needs no registry, and
-            // can't be orphaned.
+            var retryMessageId = CreatePhysicalMessageId("delayed", sessionId, logicalMessageId, attempt);
             var resend = new ServiceBusMessage(message.Body)
             {
-                MessageId = message.MessageId,
+                MessageId = retryMessageId,
                 SessionId = sessionId
             };
-            resend.ApplicationProperties["RetryCount"] = attempts;
+            resend.ApplicationProperties[LogicalMessageIdProperty] = logicalMessageId;
+            resend.ApplicationProperties[RetryCountProperty] = attempt;
 
             var scheduledEnqueueTime = DateTimeOffset.UtcNow + RetryDelay;
-
-            // Order matters here: schedule first and capture the seq, mark blocked (that's
-            // the durable hold-back, and now it carries the seq), then complete. If we
-            // crash right after marking blocked, the original re-delivers when its lock
-            // expires and we re-process it under the block — which is correct. The seq is
-            // only missing in the narrow window between schedule and the state write; the
-            // fallback scan covers that.
-            var scheduledSeq = await inputQueueSender.ScheduleMessageAsync(resend, scheduledEnqueueTime, ct);
-            await MarkSessionBlockedAsync(receiver, sessionId, message.MessageId, scheduledSeq, workerId);
+            await inputQueueSender.ScheduleMessageAsync(resend, scheduledEnqueueTime, ct);
+            await MarkSessionBlockedAsync(receiver, sessionId, logicalMessageId, retryMessageId, scheduledEnqueueTime, workerId);
             await receiver.CompleteMessageAsync(message, ct);
 
-            WriteLine($"[PUMP-{workerId}]   Scheduled resend of '{message.MessageId}' (+{(int)RetryDelay.TotalSeconds}s), original completed, session BLOCKED — backlog held.");
+            WriteLine($"[PUMP-{workerId}]   Scheduled '{retryMessageId}' for logical '{logicalMessageId}' (+{(int)RetryDelay.TotalSeconds}s), original completed, session BLOCKED.");
             return false;
         }
+    }
+
+    static string GetLogicalMessageId(ServiceBusReceivedMessage message)
+    {
+        if (!message.ApplicationProperties.TryGetValue(LogicalMessageIdProperty, out var value))
+            return message.MessageId;
+
+        return value is string logicalMessageId && !string.IsNullOrWhiteSpace(logicalMessageId)
+            ? logicalMessageId
+            : throw new InvalidOperationException($"'{LogicalMessageIdProperty}' must be a non-empty string.");
+    }
+
+    static int GetCount(ServiceBusReceivedMessage message, string propertyName)
+    {
+        if (!message.ApplicationProperties.TryGetValue(propertyName, out var value))
+            return 0;
+
+        return value switch
+        {
+            int count when count >= 0 => count,
+            long count when count is >= 0 and <= int.MaxValue => (int)count,
+            _ => throw new InvalidOperationException($"'{propertyName}' must be a non-negative integer.")
+        };
+    }
+
+    static string CreatePhysicalMessageId(string purpose, string sessionId, string logicalMessageId, int attempt)
+    {
+        var identity = Encoding.UTF8.GetBytes($"{purpose}\n{sessionId}\n{logicalMessageId}\n{attempt}");
+        return $"{purpose}-{Convert.ToHexString(SHA256.HashData(identity))}";
     }
 
     static async Task ClearSessionBlockedStateAsync(ServiceBusSessionReceiver receiver, string sessionId, int workerId)
@@ -736,12 +670,8 @@ internal class Program
     // DLQ RETRY PROCESSOR
     // ---------------------------------------------------------------
 
-    // Reads from the dead-letter queue and re-sends messages into the input queue — a
-    // stand-in for what ServiceControl would do. Re-sent messages land as ordinary
-    // messages behind the backlog, and the peek-and-search hold-back treats them the
-    // same as a scheduled resend (same SessionId + MessageId identity matching). Worth
-    // noting this is the entity DLQ, not a real ServiceControl error queue; functionally
-    // equivalent for the hold-back, but it's not the production shape.
+    // This entity-DLQ loop stands in for a ServiceControl retry. The production
+    // shape has a separate error queue and operational retry policy.
     static async Task RunDlqRetryProcessorAsync(ServiceBusClient client, CancellationToken ct)
     {
         try { await Task.Delay(TimeSpan.FromSeconds(10), ct); } catch (OperationCanceledException) { return; }
@@ -768,28 +698,28 @@ internal class Program
 
             await using var sender = client.CreateSender(Prepare.InputQueueName);
 
-            var retryMessage = new ServiceBusMessage(message);
-            retryMessage.SessionId = message.SessionId;
-
-            var retryCount = 0;
-            if (message.ApplicationProperties.TryGetValue("RetryCount", out var rc) && rc is int existingCount)
+            var logicalMessageId = GetLogicalMessageId(message);
+            var manualRetryCount = GetCount(message, ManualRetryCountProperty) + 1;
+            if (manualRetryCount > 3)
             {
-                retryCount = existingCount;
-            }
-            retryCount++;
-            retryMessage.ApplicationProperties["RetryCount"] = retryCount;
-
-            if (retryCount > 3)
-            {
-                WriteLine($"[DLQ] Message '{message.MessageId}' exceeded max retries ({retryCount}). Dead-lettering permanently.");
-                await args.DeadLetterMessageAsync(message, "MaxRetriesExceeded", "Exceeded maximum retry count", ct);
+                WriteLine($"[DLQ] Logical message '{logicalMessageId}' exceeded max manual retries ({manualRetryCount}).");
+                await args.DeadLetterMessageAsync(message, "MaxRetriesExceeded", "Exceeded maximum manual retry count", ct);
                 return;
             }
 
-            WriteLine($"[DLQ] Retry #{retryCount} for '{message.MessageId}'");
+            var retryMessage = new ServiceBusMessage(message)
+            {
+                MessageId = CreatePhysicalMessageId("manual", message.SessionId!, logicalMessageId, manualRetryCount),
+                SessionId = message.SessionId
+            };
+            retryMessage.ApplicationProperties[LogicalMessageIdProperty] = logicalMessageId;
+            retryMessage.ApplicationProperties[RetryCountProperty] = 0;
+            retryMessage.ApplicationProperties[ManualRetryCountProperty] = manualRetryCount;
+
+            WriteLine($"[DLQ] Manual retry #{manualRetryCount} for logical '{logicalMessageId}' as '{retryMessage.MessageId}'");
 
             await sender.SendMessageAsync(retryMessage, ct);
-            WriteLine($"[DLQ] Re-sent '{message.MessageId}' to input queue (session '{message.SessionId}')");
+            WriteLine($"[DLQ] Re-sent logical '{logicalMessageId}' to input queue (session '{message.SessionId}')");
 
             await args.CompleteMessageAsync(message, ct);
             WriteLine($"[DLQ] Completed DLQ message '{message.MessageId}'");
@@ -932,22 +862,10 @@ internal class Program
 public record SessionState
 {
     public bool IsBlocked { get; init; }
-    public string? BlockedMessageId { get; init; }
+    public string? LogicalMessageId { get; init; }
+    public string? ExpectedRetryMessageId { get; init; }
     public DateTimeOffset? BlockedAt { get; init; }
     public DateTimeOffset? RetryAfter { get; init; }
-    // The sequence number returned by ScheduleMessageAsync when the pump scheduled the
-    // retry. A LOWER BOUND on the retry's position, not its address — ASB sequences
-    // scheduled messages at enqueue time, so the retry always lands at or after this.
-    // The hold-back uses it as the scan's starting point, skipping the backlog instead
-    // of re-walking the head. Null on restart-recovery or for external retries, where
-    // the scan starts from the head.
-    public long? ScheduledSequenceNumber { get; init; }
-    // The furthest sequence number the hold-back's scan has peeked without finding the
-    // retry. Persisted so a scan that runs off the end (retry due but not enqueued —
-    // broker lag or client clock ahead of the broker) resumes from here instead of
-    // re-walking the backlog, and a restarted pump picks up the same frontier. Safe
-    // because it is only advanced while the retry is not enqueued, and seqs are assigned
-    // at enqueue time, so everything ruled out is below the retry's eventual seq.
     public long? LastPeekedSequenceNumber { get; init; }
 
     public static SessionState Default => new() { IsBlocked = false };
@@ -956,14 +874,14 @@ public record SessionState
     {
         return System.Text.Json.JsonSerializer.Serialize(new
         {
-            version = 5,
+            version = 6,
             transport = new
             {
                 blocked = IsBlocked,
-                blockedMessageId = BlockedMessageId,
+                logicalMessageId = LogicalMessageId,
+                expectedRetryMessageId = ExpectedRetryMessageId,
                 blockedAt = BlockedAt?.ToString("O"),
                 retryAfter = RetryAfter?.ToString("O"),
-                scheduledSequenceNumber = ScheduledSequenceNumber,
                 lastPeekedSequenceNumber = LastPeekedSequenceNumber
             }
         });
@@ -971,34 +889,34 @@ public record SessionState
 
     public static SessionState FromJson(string json)
     {
-        try
-        {
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
-            var t = doc.RootElement.GetProperty("transport");
-            if (!t.GetProperty("blocked").GetBoolean())
-                return Default;
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var version = root.GetProperty("version").GetInt32();
+        if (version != 6)
+            throw new InvalidOperationException($"Unsupported session-state version '{version}'.");
 
-            return new SessionState
-            {
-                IsBlocked = true,
-                BlockedMessageId = t.GetProperty("blockedMessageId").GetString(),
-                BlockedAt = t.TryGetProperty("blockedAt", out var ba) && ba.ValueKind == System.Text.Json.JsonValueKind.String
-                    ? DateTimeOffset.Parse(ba.GetString()!)
-                    : null,
-                RetryAfter = t.TryGetProperty("retryAfter", out var ra) && ra.ValueKind == System.Text.Json.JsonValueKind.String
-                    ? DateTimeOffset.Parse(ra.GetString()!)
-                    : null,
-                ScheduledSequenceNumber = t.TryGetProperty("scheduledSequenceNumber", out var ssn) && ssn.ValueKind == System.Text.Json.JsonValueKind.Number
-                    ? ssn.GetInt64()
-                    : null,
-                LastPeekedSequenceNumber = t.TryGetProperty("lastPeekedSequenceNumber", out var lpsn) && lpsn.ValueKind == System.Text.Json.JsonValueKind.Number
-                    ? lpsn.GetInt64()
-                    : null
-            };
-        }
-        catch
-        {
+        var transport = root.GetProperty("transport");
+        if (!transport.GetProperty("blocked").GetBoolean())
             return Default;
-        }
+
+        var logicalMessageId = transport.GetProperty("logicalMessageId").GetString();
+        var expectedRetryMessageId = transport.GetProperty("expectedRetryMessageId").GetString();
+        if (string.IsNullOrWhiteSpace(logicalMessageId) || string.IsNullOrWhiteSpace(expectedRetryMessageId))
+            throw new InvalidOperationException("Blocked session state requires logical and physical retry identities.");
+
+        var blockedAt = DateTimeOffset.Parse(transport.GetProperty("blockedAt").GetString()!);
+        var retryAfter = DateTimeOffset.Parse(transport.GetProperty("retryAfter").GetString()!);
+
+        return new SessionState
+        {
+            IsBlocked = true,
+            LogicalMessageId = logicalMessageId,
+            ExpectedRetryMessageId = expectedRetryMessageId,
+            BlockedAt = blockedAt,
+            RetryAfter = retryAfter,
+            LastPeekedSequenceNumber = transport.TryGetProperty("lastPeekedSequenceNumber", out var lastPeeked) && lastPeeked.ValueKind == System.Text.Json.JsonValueKind.Number
+                ? lastPeeked.GetInt64()
+                : null
+        };
     }
 }
